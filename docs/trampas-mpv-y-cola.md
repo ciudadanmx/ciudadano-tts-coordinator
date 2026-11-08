@@ -274,7 +274,53 @@ al terminar:          [spotify] restaurado pid 4828 → 100%
 FINAL:                todas las apps al 100%
 ```
 
-## 14. Checklist antes de dar por terminado
+## 14. Ducking de YouTube: la regla correcta (2026-11-07)
+
+Síntoma: **"no se está bajando el volumen de YouTube"** (con `youtube = reducir 87%`).
+
+### Lo que pasaba
+
+La regla implementada era *"si Chrome tiene reproducción activa → NO se baja su
+volumen"* (porque se asumía que el contenido se pausaba). Pero esa regla se
+aplicaba **siempre**, incluso con la política **reducir**, donde **no se pausa
+nada** → el video se quedaba al 100% y se mezclaba con la locución.
+
+Además, la detección tenía **dos fallos**:
+
+1. **Orden**: `applyDucking` pausaba YouTube (política `pause`) **antes** de
+   preguntar "¿hay reproducción activa?" → la respuesta ya era "no" → Chrome se
+   bajaba cuando no debía.
+2. **El daemon ignora los filtros**: `media-list` con `app`/`onlyPlaying` devuelve
+   **todas** las sesiones (no filtra) → el resultado dependía del estado devuelto.
+   Además el estado GSMTC tiene **lag**: tras reanudar, la sesión sigue marcada
+   como "pausada" un instante → la detección daba falso.
+
+### Regla final (determinista)
+
+| Política de YouTube | ¿Chrome tiene un video? | Volumen de Chrome |
+|---|---|---|
+| **reducir X%** | sí o no | **siempre baja** a `100 - X` % (el video **no** se pausa) |
+| **pausar** | sí (sesión multimedia presente, reproduciendo o pausada) | **no baja** — el contenido se pausa/reanuda selectivamente |
+| **pausar** | no | baja según su propia política |
+| **ignorar** | — | no baja |
+
+- La medición de "hay video" se hace **ANTES** de aplicar cualquier política
+  (`_estadoMediaChrome()`), y se cachea 5 s.
+- La caché se invalida al pausar y al reanudar (el estado cambió).
+
+### Verificado (con "Oppenheimer" reproduciéndose en Chrome)
+
+```
+CASO A: youtube reducir 87%
+  DURANTE:  chrome 13%  (100 - 87)   | el video SIGUE reproduciendo (no se pausa)
+  DESPUES:  chrome 100%
+
+CASO B: youtube pausar + chrome reducir 30%
+  DURANTE:  chrome 100%  (no baja, el video se pausa)  | spotify 70% (según su config)
+  DESPUES:  chrome 100%  | video reanudado
+```
+
+## 15. Checklist antes de dar por terminado
 
 1. `node --check` de todos los `.js` modificados + `python -m py_compile` de los `.py`.
 2. Copiar al runtime: `%TEMP%\ciudadan-tts-coordinator\`.
