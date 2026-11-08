@@ -1,0 +1,119 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3199,
+    "authTokenEnv": "CIUDADAN_TTS_TOKEN"
+  },
+  "player": {
+    "type": "mpv",
+    "mpvPath": "C:\\Program Files\\MPV Player\\mpv.exe",
+    "ipcSocket": null,
+    "volume": 600,
+    "idleTimeoutMs": 30000,
+    "restartOnCrash": true,
+    "maxRestarts": 5,
+    "restartWindowMs": 60000
+  },
+  "queue": {
+    "maxLength": 100,
+    "maxTextLength": 50000,
+    "priorityLevels": [
+      "high",
+      "normal",
+      "low"
+    ],
+    "lockTimeoutMs": 120000,
+    "preSynthesizeAhead": 2
+  },
+  "synthesis": {
+    "provider": "edge",
+    "edgeBin": "edge-tts",
+    "timeoutMs": 60000,
+    "cacheEnabled": true,
+    "cacheMaxMb": 200,
+    "cacheDir": null
+  },
+  "voices": {
+    "default": "es-CO-SalomeNeural",
+    "profiles": {
+      "dsh1-session-a": "es-MX-DaliaNeural",
+      "dsh1-session-b": "es-MX-DaliaNeural",
+      "dsh1-session-c": "es-MX-DaliaNeural",
+      "dsh2-default": "es-CO-SalomeNeural",
+      "claude-code": "es-AR-TomasNeural"
+    },
+    "fallbackChain": [
+      "es-CO-SalomeNeural",
+      "es-MX-DaliaNeural",
+      "es-MX-JorgeNeural",
+      "es-AR-TomasNeural",
+      "es-ES-ElviraNeural"
+    ]
+  },
+  "announcements": {
+    "enabled": true,
+    "prefixTemplate": "{sessionName}. {taskTitle}.",
+    "minTitleLength": 3,
+    "maxTitleLength": 80
+  },
+  "multimedia": {
+    "applications": {
+      "youtube": {
+        "mode": "pause",
+        "percentage": 100,
+        "processNames": ["chrome"],
+        "matchUrl": "youtube.com",
+        "pauseSupported": true
+      },
+      "chrome": {
+        "mode": "reduce",
+        "percentage": 30,
+        "processNames": ["chrome"],
+        "pauseSupported": false
+      },
+      "spotify": {
+        "mode": "ignore",
+        "percentage": 0,
+        "processNames": ["spotify"],
+        "pauseSupported": false
+      },
+      "vlc": {
+        "mode": "ignore",
+        "percentage": 0,
+        "processNames": ["vlc"],
+        "pauseSupported": false
+      }
+    },
+    "youtube": {
+      "pauseEnabled": true,
+      "resumeAutomatically": true,
+      "port": 9222
+    },
+    "tts": {
+      "volume": 100
+    }
+  },
+  "textProcessing": {
+    "skipCodeBlocks": true,
+    "skipInlineCode": true,
+    "summarizeTables": true,
+    "skipImagePaths": true,
+    "maxCharsPerChunk": 320,
+    "preserveLists": true,
+    "preserveParagraphs": true,
+    "longReplyStrategy": "full"
+  },
+  "recovery": {
+    "heartbeatIntervalMs": 5000,
+    "playerCrashDetectionMs": 3000,
+    "maxConsecutiveErrors": 3,
+    "statePersistIntervalMs": 10000,
+    "stateFile": null
+  },
+  "logging": {
+    "level": "info",
+    "file": null,
+    "maxSizeMb": 10,
+    "redactText": true
+  }
+}

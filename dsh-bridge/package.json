@@ -1,0 +1,12 @@
+{
+  "name": "@ciudadan/dsh-tts-coordinator-bridge",
+  "version": "1.0.0",
+  "description": "Puente entre DSH y ciudadano-tts-coordinator: envía locuciones al coordinador global en lugar de reproducir en el navegador",
+  "type": "module",
+  "main": "lib/index.js",
+  "cordis": {
+    "name": "@ciudadan/dsh-tts-coordinator-bridge"
+  },
+  "license": "MIT",
+  "private": true
+}

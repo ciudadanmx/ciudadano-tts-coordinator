@@ -1,0 +1,47 @@
+# Dependencias
+node_modules/
+npm-debug.log*
+yarn-error.log*
+package-lock.json.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Configuración local y secretos (NUNCA subir)
+config/local.json
+config/config.json
+.env
+.env.*
+*.token
+token
+secrets.json
+credentials.json
+
+# Datos de runtime y logs
+*.log
+logs/
+coordinator/
+audio-cache/
+*.mp3
+*.wav
+*.m4a
+*.opus
+
+# Backups y temporales
+_backup-*/
+_tmp/
+tmp/
+*.tmp
+*.bak
+*.orig
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
