@@ -455,6 +455,14 @@ export class UtteranceQueue extends EventEmitter {
           this._queueEvent({ requestId: utterance.requestId, state: 'done', finishedAt: utterance.finishedAt })
           this.emit('done', utterance)
           logger.info('Playback done', { requestId: utterance.requestId })
+        } else if (utterance.stoppedBySource) {
+          // La fuente fue desactivada desde el panel: se detiene SOLO su audio.
+          utterance.status = 'cancelled'
+          utterance.playStatus = 'cancelled'
+          utterance.finishedAt = Date.now()
+          this._pushHistory(utterance)
+          this._queueEvent({ requestId: utterance.requestId, state: 'cancelled', finishedAt: utterance.finishedAt })
+          logger.info('Reproducción cancelada: fuente desactivada', { requestId: utterance.requestId, source: utterance.source })
         } else {
           // fue interrumpida por un replay 'now' (ya está re-encolada como 'queued')
           this._queueEvent({ requestId: utterance.requestId, state: 'queued', createdAt: utterance.createdAt })
@@ -587,6 +595,25 @@ export class UtteranceQueue extends EventEmitter {
       }
     }
     return { ...r, mode, interrupted }
+  }
+
+  /**
+   * Detiene la reproducción ACTUAL solo si pertenece a la fuente indicada.
+   * Se usa al desactivar una fuente desde el panel: se detiene únicamente su
+   * audio; no se toca el agente, ni las demás fuentes, ni la cola pendiente.
+   */
+  stopCurrentIfSource(sourceRaw) {
+    if (!this.playing) return { ok: false, stopped: false, reason: 'no-current' }
+    const cur = this.items.get(this.playing)
+    if (!cur) return { ok: false, stopped: false, reason: 'no-current' }
+    if (String(cur.source || '').toLowerCase() !== String(sourceRaw || '').toLowerCase()) {
+      return { ok: false, stopped: false, reason: 'different-source', current: cur.source }
+    }
+    // El _process marca el item como cancelado al resolverse el play.
+    cur.stoppedBySource = true
+    try { this.deps.player?.stop() } catch { /* el play resolverá solo */ }
+    logger.info('Detenida reproducción de fuente desactivada', { requestId: cur.requestId, source: cur.source })
+    return { ok: true, stopped: true, requestId: cur.requestId }
   }
 
   // --- Cancelar solicitud ---

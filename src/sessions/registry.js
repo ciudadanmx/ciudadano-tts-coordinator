@@ -138,6 +138,31 @@ export class SessionRegistry {
     return { ok: true, sessionId, voice }
   }
 
+  /**
+   * Actualiza la voz de TODAS las sesiones de una fuente (y sus alias).
+   * Se usa cuando la voz se cambia desde el panel: la preferencia de la fuente
+   * prevalece sobre la asignación antigua de cada sesión.
+   */
+  setVoiceForSource(sourceRaw, voice, aliases = []) {
+    const keys = new Set([sourceRaw, ...aliases].filter(Boolean).map(s => String(s).toLowerCase()))
+    let updated = 0
+    for (const [sid, info] of this.sessionInfo) {
+      if (keys.has(String(info.source || '').toLowerCase())) {
+        this.assignments.set(sid, voice)
+        updated++
+      }
+    }
+    for (const key of [...this.assignments.keys()]) {
+      if (keys.has(String(key).toLowerCase())) {
+        this.assignments.set(key, voice)
+        updated++
+      }
+    }
+    if (updated) this._save()
+    logger.info('Voz propagada a las sesiones de la fuente', { source: sourceRaw, voice, sesiones: updated })
+    return { ok: true, updated, voice }
+  }
+
   getSession(sessionId) {
     const info = this.sessionInfo.get(sessionId) || { sessionId }
     return {

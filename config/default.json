@@ -48,8 +48,57 @@
       "es-MX-JorgeNeural",
       "es-AR-TomasNeural",
       "es-ES-ElviraNeural"
-    ]
+    ],
+    "featured": {
+      "_source": "Casting reuse de los comparadores originales: C:\\Users\\elyiz\\Ciudadan_Voces_TTS\\comparador.html (femeninas) y C:\\Users\\elyiz\\Ciudadan_Voces_Dany\\comparador.html (masculinas)",
+      "female": [
+        "es-MX-DaliaNeural",
+        "es-US-PalomaNeural",
+        "es-CO-SalomeNeural",
+        "es-PE-CamilaNeural",
+        "es-AR-ElenaNeural",
+        "es-CL-CatalinaNeural"
+      ],
+      "male": [
+        "es-MX-JorgeNeural",
+        "es-CL-LorenzoNeural",
+        "es-CO-GonzaloNeural",
+        "es-PE-AlexNeural",
+        "es-AR-TomasNeural",
+        "es-US-AlonsoNeural"
+      ]
+    }
   },
+  "sources": [
+    {
+      "id": "dsh1",
+      "name": "DSH1",
+      "enabled": true,
+      "voice": "es-MX-DaliaNeural",
+      "aliases": ["dsh1", "dsh-1", "agente1", "dsh"]
+    },
+    {
+      "id": "dsh2",
+      "name": "DSH2",
+      "enabled": true,
+      "voice": "es-CO-SalomeNeural",
+      "aliases": ["dsh2", "dsh-2", "agente2"]
+    },
+    {
+      "id": "dany",
+      "name": "DSH Dany",
+      "enabled": true,
+      "voice": "es-CL-LorenzoNeural",
+      "aliases": ["dany", "dsh-dany", "danny"]
+    },
+    {
+      "id": "claude",
+      "name": "Claude",
+      "enabled": true,
+      "voice": "es-AR-TomasNeural",
+      "aliases": ["claude", "claude-code", "claude-orch", "claudeorch"]
+    }
+  ],
   "announcements": {
     "enabled": true,
     "prefixTemplate": "{sessionName}. {taskTitle}.",

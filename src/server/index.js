@@ -11,6 +11,7 @@ import { UtteranceQueue } from '../queue/manager.js'
 import { MpvPlayer } from '../player/mpv.js'
 import { EdgeSynthesizer } from '../synthesis/edge.js'
 import { SessionRegistry, cleanTitle } from '../sessions/registry.js'
+import { SourceRegistry } from '../sources/registry.js'
 import { DshTitleResolver } from '../sessions/dsh-titles.js'
 import { MultimediaController } from '../multimedia/controller.js'
 
@@ -33,6 +34,8 @@ logger.info(`Token generado/disponible en ${process.env.CIUDADAN_TTS_TOKEN ? 'en
 const synthesizer = new EdgeSynthesizer(config)
 const player = new MpvPlayer(config)
 const sessions = new SessionRegistry(config)
+// Fuentes de voz (agentes/servicios). Registro extensible y persistente.
+const sources = new SourceRegistry(config)
 const dshTitles = new DshTitleResolver()
 const multimedia = new MultimediaController(config)
 
@@ -172,6 +175,14 @@ route('GET', '/api/v1/status', async (req, res) => {
 // Enviar locución a la cola
 route('POST', '/api/v1/speech', async (req, res) => {
   const body = await parseJsonBody(req)
+  const src = sources.resolve(body.source)
+  const esPreview = body.preview === true
+  // Fuente desactivada en el panel: la locución se DESCARTA (no se acumula una
+  // cola silenciosa que después se reproduzca toda junta). No se toca el agente.
+  if (!esPreview && src && src.enabled === false) {
+    logger.info('Locución descartada: fuente desactivada', { source: body.source, id: src.id })
+    return sendJson(res, 202, { ok: true, skipped: true, reason: 'source-disabled', source: src.id })
+  }
   // Registrar sesión PRIMERO para que getVoice conozca el source y asigne la voz correcta
   if (body.sessionId) {
     sessions.registerSession(body.sessionId, {
@@ -186,23 +197,30 @@ route('POST', '/api/v1/speech', async (req, res) => {
   const cleanTask = pareceSessionId(body.taskTitle, body.sessionId) ? '' : tituloLimpio(cleanTitle(body.taskTitle))
   const cleanSess = pareceSessionId(body.sessionTitle, body.sessionId) ? '' : tituloLimpio(cleanTitle(body.sessionTitle))
   const resolvedTitle = cleanTask || cleanSess || realName || ''
+  // La VOZ DE LA FUENTE prevalece: lo elegido en el panel gana sobre los
+  // valores por defecto antiguos de esa fuente y sobre la asignación por sesión.
+  const voice = (src?.voice || body.voice || sessions.getVoice(body.sessionId || ''))
   const request = {
     requestId: body.requestId || randomUUID(),
     source: body.source || 'unknown',
+    sourceId: src?.id || body.source || 'unknown',
     sessionId: body.sessionId || '',
     sessionName: realName, // nombre REAL de la sesión (disco DSH) — se anuncia en el prefix
     sessionTitle: resolvedTitle || body.sessionTitle || '',
     taskTitle: resolvedTitle || body.taskTitle || '',
-    voice: body.voice || sessions.getVoice(body.sessionId || ''),
+    voice,
     text: String(body.text || ''),
     priority: body.priority || 'normal',
     interventionId: body.interventionId,
     fragmentIndex: body.fragmentIndex ?? 0,
     totalFragments: body.totalFragments ?? 1,
+    preview: esPreview,
   }
   if (!request.text.trim()) {
     return sendJson(res, 400, { ok: false, error: { code: 'no-text', message: 'text is required' } })
   }
+  // Actividad real de la fuente (indicador de conexión del panel)
+  if (!esPreview) sources.markSeen(body.source)
   const result = queue.enqueue(request)
   if (!result.ok) return sendJson(res, 429, { ok: false, error: result.error, requestId: result.requestId })
   sendJson(res, 202, { ok: true, ...result })
@@ -408,11 +426,73 @@ route('POST', '/api/v1/multimedia/restore', async (req, res) => {
 // Voces disponibles
 route('GET', '/api/v1/voices', async (req, res) => {
   try {
-    const voices = await synthesizer.listVoices()
-    sendJson(res, 200, { ok: true, spanishVoices: voices, assignments: sessions.getAllAssignments() })
+    // Catálogo COMPLETO (todos los idiomas) con género, país e identificador.
+    const catalog = await synthesizer.listVoiceCatalog()
+    const spanish = catalog.filter(v => v.spanish)
+    sendJson(res, 200, {
+      ok: true,
+      catalog,
+      spanishVoices: spanish.map(v => v.id), // compatibilidad con clientes previos
+      female: catalog.filter(v => /^female$/i.test(v.gender)).map(v => v.id),
+      male: catalog.filter(v => /^male$/i.test(v.gender)).map(v => v.id),
+      // Voces destacadas: casting original de Ciudadan (comparadores CDR)
+      featured: config.voices?.featured || { female: [], male: [] },
+      count: catalog.length,
+      assignments: sessions.getAllAssignments(),
+    })
   } catch (e) {
-    sendJson(res, 200, { ok: true, spanishVoices: [], error: e.message, assignments: sessions.getAllAssignments() })
+    sendJson(res, 200, { ok: true, spanishVoices: [], catalog: [], error: e.message, assignments: sessions.getAllAssignments() })
   }
+})
+
+// Muestra de una voz: usa el MISMO motor y reproductor (no hay TTS paralelo).
+// Se encola con prioridad normal: NO interrumpe las locuciones de otros agentes.
+route('POST', '/api/v1/voices/preview', async (req, res) => {
+  const body = await parseJsonBody(req)
+  const voice = String(body.voice || '')
+  if (!voice) return sendJson(res, 400, { ok: false, error: { code: 'no-voice', message: 'voice requerida' } })
+  const result = queue.enqueue({
+    requestId: randomUUID(),
+    source: 'preview',
+    sourceId: 'preview',
+    sessionId: '',
+    sessionName: '',           // sin anuncio de sesión
+    sessionTitle: 'Muestra de voz',
+    taskTitle: '',
+    voice,
+    text: String(body.text || 'Esta es una muestra de la voz seleccionada.'),
+    priority: 'normal',
+    preview: true,
+  })
+  if (!result.ok) return sendJson(res, 429, { ok: false, error: result.error, requestId: result.requestId })
+  sendJson(res, 202, { ok: true, ...result, voice })
+})
+
+// --- Fuentes de voz (agentes/servicios) ---
+route('GET', '/api/v1/sources', (req, res) => {
+  sendJson(res, 200, { ok: true, sources: sources.list() })
+})
+route('PUT', '/api/v1/sources/:id', async (req, res, params) => {
+  const body = await parseJsonBody(req)
+  const actual = sources.get(params.id)
+  if (!actual) {
+    return sendJson(res, 404, { ok: false, error: { code: 'not-found', message: 'Fuente de voz desconocida' } })
+  }
+  let stopped = null
+  if (body.enabled !== undefined) {
+    const antes = actual.enabled !== false
+    const ahora = !!body.enabled
+    const src = sources.setEnabled(params.id, ahora)
+    // Si se desactiva una fuente que está hablando: detener SOLO esa reproducción.
+    if (antes && !ahora) stopped = queue.stopCurrentIfSource(src.id)
+  }
+  if (body.voice) {
+    const src = sources.setVoice(params.id, body.voice)
+    // La voz de la fuente prevalece sobre las asignaciones antiguas por sesión.
+    sessions.setVoiceForSource(src.id, src.voice, src.aliases)
+  }
+  const updated = sources.list().find(s => s.id === sources.get(params.id).id)
+  sendJson(res, 200, { ok: true, source: updated, stopped })
 })
 
 // OpenAI-compatible endpoint (genera audio pero NO coordina reproducción)
@@ -459,6 +539,10 @@ route('GET', '/', (req, res) => {
   #cfgPanel { background: #16213e; border-radius: 10px; max-width: 660px; margin: 50px auto; padding: 20px; max-height: 82vh; overflow: auto; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
   .cfg-app { border-bottom: 1px solid #333; padding: 8px 0; }
   .cfg-app label { min-width: 0; margin-right: 10px; }
+  #voiceOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 12; }
+  #voicePanel { background: #16213e; border-radius: 10px; max-width: 720px; margin: 40px auto; padding: 20px; max-height: 86vh; overflow: auto; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
+  #voiceList > div:hover { background: #0f3460; }
+  .src-chip { font-size: 10px; color: #888; }
 </style>
 </head>
 <body>
@@ -473,6 +557,11 @@ route('GET', '/', (req, res) => {
   <button onclick="prevReplay()">⏮ ANTERIOR</button>
   <button onclick="ctrl('skip')">⏭ SIGUIENTE</button>
   <button class="secondary" onclick="openCfg()" title="Configurar volumen y acciones">⚙️</button>
+</div>
+<div class="card">
+  <h3>🎙️ Fuentes de voz</h3>
+  <p style="font-size:11px;color:#888;margin:0 0 6px">Desmarca una fuente para silenciar sus locuciones (no afecta al agente ni a las demás fuentes). La voz elegida aquí prevalece sobre los valores por defecto.</p>
+  <table id="sources"><tr><th>Activa</th><th>Fuente</th><th>Estado</th><th>Voz</th><th></th></tr></table>
 </div>
 <div class="card">
   <h3>Cola: <span id="queueLen">0</span> solicitudes</h3>
@@ -513,6 +602,20 @@ route('GET', '/', (req, res) => {
       <button class="secondary" onclick="forceRestore()">↩ Restaurar audio ahora</button>
       <button class="secondary" style="float:right" onclick="closeCfg()">✖ Cerrar</button>
     </div>
+  </div>
+</div>
+<div id="voiceOverlay" onclick="if(event.target===this)closeVoicePicker()">
+  <div id="voicePanel">
+    <h3 style="margin-top:0">🎙️ Seleccionar voz</h3>
+    <div class="src-chip" id="voiceTarget" style="margin-bottom:8px"></div>
+    <div style="margin-bottom:8px">
+      <button class="secondary" id="tabFemale" onclick="setVoiceCategory('female')">👩 Femeninas</button>
+      <button class="secondary" id="tabMale" onclick="setVoiceCategory('male')">👨 Masculinas</button>
+      <span class="src-chip" id="voiceCount" style="margin-left:8px"></span>
+    </div>
+    <input id="voiceSearch" placeholder="Buscar por nombre, país o identificador (ej. Dalia, es-MX, Salome)" oninput="renderVoiceList()" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:8px;background:#0f3460;color:#eee;border:1px solid #333;border-radius:4px">
+    <div id="voiceList"></div>
+    <div style="margin-top:10px;text-align:right"><button class="secondary" onclick="closeVoicePicker()">✖ Cerrar</button></div>
   </div>
 </div>
 <script>
@@ -719,14 +822,186 @@ async function saveVol() {
   document.getElementById('ttsVolNow').textContent = v;
   flash('💾 Volumen TTS guardado: ' + v + '%');
 }
+// ===================== FUENTES DE VOZ =====================
+// Las filas se GENERAN desde /api/v1/sources (registro extensible): agregar una
+// fuente nueva en config no requiere tocar el HTML.
+var __sources = [];
+var __sourcesSig = '';
+async function refreshSources() {
+  try {
+    const r = await api('/api/v1/sources');
+    const list = r.sources || [];
+    // Solo se re-dibuja si algo cambió: así no se pierde el clic del usuario
+    // ni el foco mientras interactúa con los checkboxes.
+    const sig = JSON.stringify(list.map(s => [s.id, s.enabled, s.voice, s.connected, s.lastSeen, s.utterances]));
+    if (sig === __sourcesSig) return;
+    __sourcesSig = sig;
+    __sources = list;
+    document.getElementById('sources').innerHTML =
+      '<tr><th>Activa</th><th>Fuente</th><th>Estado</th><th>Voz</th><th></th></tr>' +
+      list.map(s =>
+        '<tr>' +
+        '<td><input type="checkbox" data-src="' + esc(s.id) + '" ' + (s.enabled ? 'checked' : '') +
+          ' onchange="toggleSource(this)" title="Silenciar / activar esta fuente"></td>' +
+        '<td><b>' + esc(s.name) + '</b><br><span class="src-chip">' + esc(s.id) +
+          (s.aliases && s.aliases.length ? ' · alias: ' + esc(s.aliases.join(', ')) : '') + '</span></td>' +
+        '<td>' + (s.connected
+            ? '<span style="color:#4caf50">● conectado</span>'
+            : '<span style="color:#888">○ sin conexión</span>') +
+          (s.lastSeen ? '<br><span class="src-chip">último: ' + new Date(s.lastSeen).toLocaleTimeString('es-MX') + '</span>' : '') +
+          '<br><span class="src-chip">' + (s.utterances || 0) + ' locución(es)</span></td>' +
+        '<td>' + esc(s.voice || '—') + '</td>' +
+        '<td><button class="secondary" data-src="' + esc(s.id) + '" onclick="openVoicePicker(this)">Seleccionar voz</button></td>' +
+        '</tr>').join('');
+  } catch (e) { console.warn('sources falló', e); }
+}
+async function toggleSource(el, enabled) {
+  const id = (el && el.dataset ? el.dataset.src : el) || '';
+  const want = (typeof enabled === 'boolean') ? enabled : !!(el && el.checked);
+  const r = await api('/api/v1/sources/' + encodeURIComponent(id), {
+    method: 'PUT', body: JSON.stringify({ enabled: want })
+  });
+  if (r && r.ok === false) {
+    flash('❌ ' + ((r.error && r.error.message) || 'no se pudo cambiar la fuente'));
+    __sourcesSig = '';
+    refreshSources();
+    return;
+  }
+  const s = (__sources || []).find(x => x.id === id);
+  if (!want) {
+    flash((r.stopped && r.stopped.stopped) ? '🔇 ' + (s ? s.name : id) + ' silenciada (se detuvo su reproducción)' : '🔇 ' + (s ? s.name : id) + ' silenciada');
+  } else {
+    flash('✅ ' + (s ? s.name : id) + ' activada');
+  }
+  __sourcesSig = '';
+  refreshSources();
+}
+
+// ===================== SELECTOR DE VOCES =====================
+// Catálogo COMPLETO (edge-tts --list-voices), separado en femeninas / masculinas.
+var __voiceCatalog = null;
+var __voiceCategory = 'female';
+var __voiceTarget = null;
+
+async function openVoicePicker(el) {
+  const sourceId = (el && el.dataset ? el.dataset.src : el) || '';
+  __voiceTarget = sourceId;
+  document.getElementById('voiceOverlay').style.display = 'block';
+  const t = (__sources || []).find(s => s.id === sourceId);
+  document.getElementById('voiceTarget').textContent = t
+    ? ('Fuente: ' + t.name + ' (' + t.id + ') — voz actual: ' + (t.voice || '—'))
+    : ('Fuente: ' + sourceId);
+  if (!__voiceCatalog) {
+    document.getElementById('voiceList').innerHTML = '<i>cargando catálogo de voces…</i>';
+    try {
+      const r = await api('/api/v1/voices');
+      __voiceCatalog = r.catalog || [];
+      window.__voiceFeatured = r.featured || { female: [], male: [] };
+    } catch (e) {
+      __voiceCatalog = [];
+      flash('❌ No se pudo cargar el catálogo de voces');
+    }
+  }
+  setVoiceCategory(__voiceCategory);
+}
+function setVoiceCategory(cat) {
+  __voiceCategory = cat;
+  const f = document.getElementById('tabFemale'), m = document.getElementById('tabMale');
+  if (f) f.style.background = cat === 'female' ? '#e94560' : '#0f3460';
+  if (m) m.style.background = cat === 'male' ? '#e94560' : '#0f3460';
+  renderVoiceList();
+}
+function renderVoiceList() {
+  const el = document.getElementById('voiceSearch');
+  const q = el ? String(el.value || '').toLowerCase().trim() : '';
+  const want = __voiceCategory === 'female' ? /^female$/i : /^male$/i;
+  let list = (__voiceCatalog || []).filter(v => want.test(v.gender || ''));
+  if (q) {
+    list = list.filter(v => (v.id + ' ' + v.name + ' ' + v.country + ' ' + v.language + ' ' + (v.personalities || '') + ' ' + (v.categories || '')).toLowerCase().includes(q));
+  }
+  // Español y sus variantes regionales primero (sin limitar el catálogo).
+  // Las voces del casting original de Ciudadan se muestran arriba, marcadas ★.
+  const featured = ((window.__voiceFeatured || {})[__voiceCategory]) || [];
+  list.sort((a, b) => {
+    const fa = featured.indexOf(a.id), fb = featured.indexOf(b.id);
+    if (fa >= 0 || fb >= 0) {
+      if (fa >= 0 && fb >= 0) return fa - fb;
+      return fa >= 0 ? -1 : 1;
+    }
+    return (b.spanish - a.spanish) || a.locale.localeCompare(b.locale) || a.id.localeCompare(b.id);
+  });
+  const cnt = document.getElementById('voiceCount');
+  if (cnt) cnt.textContent = list.length + ' voces';
+  const actual = (__sources || []).find(s => s.id === __voiceTarget);
+  const listEl = document.getElementById('voiceList');
+  if (!listEl) return;
+  listEl.innerHTML = list.map(v =>
+    '<div style="display:flex;align-items:center;gap:8px;padding:5px 6px;border-bottom:1px solid #2a2a4a">' +
+      '<button class="secondary" style="padding:4px 8px" data-v="' + esc(v.id) + '" onclick="previewVoice(this)" title="Escuchar una muestra">▶</button>' +
+      '<span style="flex:1">' +
+        '<b>' + esc(v.name) + '</b> ' +
+        '<span class="src-chip">' + esc(v.locale) + ' · ' + esc(String(v.language || '').toUpperCase()) +
+          (v.personalities ? ' · ' + esc(v.personalities) : '') + '</span>' +
+        (featured.indexOf(v.id) >= 0 ? ' <span style="color:#ffb300;font-size:11px">★ Ciudadan</span>' : '') +
+        (v.spanish ? ' <span style="color:#4caf50;font-size:11px">ES</span>' : '') +
+        (actual && actual.voice === v.id ? ' <span style="color:#e94560;font-size:11px">● actual</span>' : '') +
+        '<br><code style="font-size:10px;color:#777">' + esc(v.id) + '</code>' +
+      '</span>' +
+      '<button data-v="' + esc(v.id) + '" onclick="pickVoice(this)">Usar</button>' +
+    '</div>').join('') || '<i style="color:#888">Sin resultados para este filtro.</i>';
+}
+async function pickVoice(el) {
+  const voice = (el && el.dataset ? el.dataset.v : el) || '';
+  if (!voice || !__voiceTarget) return;
+  const r = await api('/api/v1/sources/' + encodeURIComponent(__voiceTarget), {
+    method: 'PUT', body: JSON.stringify({ voice: voice })
+  });
+  if (r && r.ok === false) {
+    flash('❌ ' + ((r.error && r.error.message) || 'no se pudo cambiar la voz'));
+    return;
+  }
+  flash('✅ Voz de la fuente actualizada: ' + voice);
+  closeVoicePicker();
+  __sourcesSig = '';
+  refreshSources();
+}
+async function previewVoice(el) {
+  const voice = (el && el.dataset ? el.dataset.v : el) || '';
+  const r = await api('/api/v1/voices/preview', { method: 'POST', body: JSON.stringify({ voice: voice }) });
+  if (r && r.ok === false) flash('❌ ' + ((r.error && r.error.message) || 'no se pudo encolar la muestra'));
+  else flash('🔊 Muestra en cola: ' + voice);
+}
+function closeVoicePicker() { document.getElementById('voiceOverlay').style.display = 'none'; }
 setInterval(refresh, 2000);
+refreshSources();
 refresh();
 </script>
 </body>
 </html>`
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
   res.end(html)
+  validarScriptPanel(html)
 }, { auth: false })
+
+/**
+ * Valida la sintaxis del <script> del panel ANTES de servirlo.
+ * El panel se arma con un template literal: un escape mal puesto (p.ej. \')
+ * rompe TODO el JavaScript del panel (botones muertos) sin que el servidor
+ * avise. Con esta comprobación el error queda registrado en el log.
+ */
+let _panelValidado = false
+function validarScriptPanel(html) {
+  if (_panelValidado) return
+  try {
+    const m = html.match(/<script>([\s\S]*?)<\/script>/)
+    if (!m) return
+    new Function(m[1]) // lanza si hay error de sintaxis
+    _panelValidado = true
+    logger.info('Script del panel validado (sintaxis correcta)')
+  } catch (e) {
+    logger.error('ERROR DE SINTAXIS en el script del panel — los botones NO funcionan', { error: e.message })
+  }
+}
 
 // --- Servidor HTTP ---
 const server = createServer(async (req, res) => {

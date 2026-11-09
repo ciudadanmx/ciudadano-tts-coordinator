@@ -8,6 +8,9 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { logger } from '../monitoring/logger.js'
 
+// El catálogo de voces no cambia: se cachea 10 min para no invocar edge-tts cada vez.
+const VOICE_CATALOG_TTL_MS = 10 * 60 * 1000
+
 export class EdgeSynthesizer {
   constructor(config) {
     this.config = config
@@ -16,6 +19,7 @@ export class EdgeSynthesizer {
     this.cacheDir = config.synthesis?.cacheDir || join(tmpdir(), 'ciudadan-tts-cache')
     this.cacheEnabled = config.synthesis?.cacheEnabled !== false
     this.cacheMaxBytes = (config.synthesis?.cacheMaxMb || 200) * 1024 * 1024
+    this._catalogCache = null
     this._ensureCacheDir()
   }
 
@@ -155,4 +159,63 @@ export class EdgeSynthesizer {
       proc.on('error', reject)
     })
   }
+
+  /**
+   * Catálogo COMPLETO de voces de edge-tts con género, región, idioma y
+   * personalidad. Es lo que consume el selector de voces del panel.
+   * No modifica el motor de síntesis: solo lee `edge-tts --list-voices`.
+   */
+  async listVoiceCatalog() {
+    if (this._catalogCache && Date.now() - this._catalogCache.at < VOICE_CATALOG_TTL_MS) {
+      return this._catalogCache.voices
+    }
+    const voices = await new Promise((resolve, reject) => {
+      const proc = spawn(this.bin, ['--list-voices'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      const out = []
+      proc.stdout.on('data', (c) => out.push(c))
+      proc.on('close', (code) => {
+        if (code !== 0) return reject(new Error(`exit ${code}`))
+        const text = Buffer.concat(out).toString('utf8')
+        const list = []
+        for (const line of text.split('\n')) {
+          const t = line.trim()
+          if (!t) continue
+          if (/^Name\s+Gender/i.test(t)) continue
+          if (/^-+/.test(t)) continue
+          const cols = t.split(/\s{2,}/).map(c => c.trim()).filter(Boolean)
+          if (cols.length < 2) continue
+          const id = cols[0]
+          if (!/^[a-z]{2,3}(-[A-Za-z0-9]{2,8}){1,3}-[A-Za-z]+/.test(id)) continue
+          const segs = id.split('-')
+          const language = segs[0]
+          // La región es el primer segmento de 2 letras MAYÚSCULAS (p.ej. "es-MX",
+          // "sr-Latn-RS" -> RS). Si no hay, se usa el segundo segmento.
+          const regionIdx = segs.findIndex((s, i) => i > 0 && /^[A-Z]{2}$/.test(s))
+          const country = regionIdx > 0 ? segs[regionIdx] : (segs[1] || '').toUpperCase()
+          list.push({
+            id,
+            name: voiceDisplayName(id),
+            gender: cols[1] || '',
+            language,
+            country,
+            locale: regionIdx > 0 ? language + '-' + country : id.slice(0, 5),
+            categories: cols[2] || '',
+            personalities: cols[3] || '',
+            spanish: language === 'es',
+          })
+        }
+        resolve(list)
+      })
+      proc.on('error', reject)
+    })
+    this._catalogCache = { at: Date.now(), voices }
+    return voices
+  }
+}
+
+// Nombre legible de una voz: es-MX-DaliaNeural -> Dalia
+function voiceDisplayName(id) {
+  const parts = String(id).split('-')
+  const name = parts.slice(2).join('-') || parts[parts.length - 1] || id
+  return name.replace(/Neural$/i, '').replace(/(\w)(\w*)/, (_, a, b) => a + b.toLowerCase())
 }
