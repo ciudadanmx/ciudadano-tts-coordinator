@@ -379,7 +379,8 @@ route('GET', '/api/v1/multimedia/sessions', async (req, res) => {
 // Actualizar política de una app (mode: pause|reduce|ignore, percentage 0-100) — persiste en config
 route('PUT', '/api/v1/multimedia/apps/:appKey', async (req, res, params) => {
   const body = await parseJsonBody(req)
-  const appKey = params.appKey
+  // Compatibilidad: "youtube" y "chrome" son el mismo control → "navegador"
+  const appKey = (params.appKey === 'youtube' || params.appKey === 'chrome') ? 'navegador' : params.appKey
   const mode = body.mode
   if (!['pause', 'reduce', 'ignore'].includes(mode)) {
     return sendJson(res, 400, { ok: false, error: "mode debe ser 'pause' | 'reduce' | 'ignore'" })
@@ -489,6 +490,7 @@ route('GET', '/', (req, res) => {
 <div class="card">
   <h3>🎛️ Ducking por aplicación <small>(persistente)</small></h3>
   <div id="mmStatus" style="font-size:12px;color:#888;margin-bottom:6px"></div>
+  <div id="mmWarn" style="display:none;margin-bottom:6px"></div>
   <table id="mmApps"><tr><th>Aplicación</th><th>Modo</th><th>% reducción</th><th>Volumen actual</th><th>Estado ducking</th><th></th></tr></table>
   <div style="font-size:11px;color:#888;margin-top:6px">
     Modos: <b>Pausar</b> (solo apps con pausa selectiva, ej. YouTube), <b>Reducir</b> (0-100% respecto al volumen original de la app), <b>Ignorar</b>.<br>
@@ -588,6 +590,15 @@ async function refreshMultimedia() {
     'Puente de audio: ' + (m.audioBridgeAvailable ? '✅ activo' : '⚠️ no disponible (stub)') +
     ' | Ducking activo: ' + (m.active ? '🔊 SÍ' : 'no') +
     ' | Excluidos: ' + (m.excludedProcesses||[]).join(', ');
+  // Avisos de conflicto (p.ej. dos apps sobre el mismo proceso de audio)
+  const warnBox = document.getElementById('mmWarn');
+  if (warnBox) {
+    const cs = m.conflicts || [];
+    warnBox.innerHTML = cs.length
+      ? cs.map(c => '<div style="background:#3a2a12;border:1px solid #8a5a12;padding:6px 8px;border-radius:6px;margin-bottom:4px">⚠️ ' + esc(c.message) + '</div>').join('')
+      : '';
+    warnBox.style.display = cs.length ? 'block' : 'none';
+  }
   const rows = ['<tr><th>Aplicación</th><th>Modo</th><th>% reducción</th><th>Volumen actual</th><th>Estado ducking</th><th></th></tr>'];
   for (const a of (m.apps||[])) {
     const vols = a.detectedSessions.map(s => s.process + '(' + s.pid + '): ' + s.volume + '%').join(', ') || '—';
@@ -602,7 +613,7 @@ async function refreshMultimedia() {
     }
     const pauseNote = (a.mode==='pause' && !a.pauseSupported) ? ' ⚠️ no admite pausa selectiva' : '';
     rows.push('<tr>' +
-      '<td><b>' + esc(a.appKey) + '</b>' + pauseNote + '</td>' +
+      '<td><b>' + esc(a.label || a.appKey) + '</b>' + pauseNote + '</td>' +
       '<td>' + modeLabel + '</td>' +
       '<td>' + a.percentage + '%</td>' +
       '<td style="font-size:11px">' + esc(vols) + '</td>' +
@@ -631,7 +642,8 @@ async function openCfg(focusApp) {
     for (const a of (m.apps||[])) {
       __cfgApps.push(a.appKey);
       rows.push('<div class="cfg-app">' +
-        '<b>' + esc(a.appKey) + '</b>' +
+        '<b>' + esc(a.label || a.appKey) + '</b>' +
+        (a.appKey === 'navegador' ? ' <span style="color:#888;font-size:11px">(YouTube y Chrome son el mismo proceso de audio: un solo control)</span>' : '') +
         (a.mode==='pause' && !a.pauseSupported ? ' <span style="color:#ffb300">⚠️ no admite pausa selectiva</span>' : '') + '<br>' +
         '<label>Modo: <select id="cfgmode-' + esc(a.appKey) + '">' +
           '<option value="pause"' + (a.mode==='pause'?' selected':'') + '>Pausar (reanuda al terminar)</option>' +
@@ -774,6 +786,26 @@ function matchRoute(pattern, path) {
 // --- Arranque ---
 async function main() {
   await multimedia.init()
+  // Migración de configuración: YouTube y Chrome son el mismo proceso de audio,
+  // así que se funden en un solo control "navegador" (Chrome / YouTube).
+  try {
+    const mig = multimedia.persistMigration()
+    if (mig) {
+      const cfg = getConfig()
+      if (!cfg.multimedia) cfg.multimedia = {}
+      if (!cfg.multimedia.applications) cfg.multimedia.applications = {}
+      for (const k of ['youtube', 'chrome']) delete cfg.multimedia.applications[k]
+      cfg.multimedia.applications.navegador = mig.navegador
+      const updated = saveConfig(cfg)
+      config.multimedia = updated.multimedia
+      logger.info('Config multimedia migrada al control único', {
+        apps: Object.keys(cfg.multimedia.applications),
+        navegador: mig.navegador.mode + ' ' + mig.navegador.percentage + '%',
+      })
+    }
+  } catch (e) {
+    logger.warn('Migración de configuración multimedia falló', { error: e.message })
+  }
   dshTitles.start() // resuelve títulos reales de sesiones DSH desde disco (cada 20s)
   logger.info(`DshTitleResolver: ${dshTitles.size} títulos de sesiones cargados`)
   // Iniciar mpv (si falla, el coordinador sigue funcionando; la síntesis puede hacerse sin reproducir)

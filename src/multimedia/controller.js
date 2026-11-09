@@ -59,6 +59,29 @@ export class MultimediaController extends EventEmitter {
     // el estado de una app (antes el snapshot se perdía y el volumen quedaba bajo
     // para siempre, p.ej. YouTube/Chrome en 8%).
     this._pendingRestore = new Map()
+    this._pendingMigration = false // hay claves viejas (youtube/chrome) que migrar
+  }
+
+  /**
+   * Persiste la fusión de "youtube"+"chrome" en el control único "navegador".
+   * La config del usuario queda limpia y el panel muestra una sola fila en vez de
+   * dos controles compitiendo por el mismo proceso.
+   */
+  persistMigration() {
+    try {
+      const apps = { ...(this.config.multimedia?.applications || {}) }
+      const fus = this._fusionarNavegador(apps)
+      if (!fus) return false
+      delete apps.youtube
+      delete apps.chrome
+      apps.navegador = fus.navegador
+      this.config.multimedia = { ...this.config.multimedia, applications: apps }
+      this._pendingMigration = false
+      return { apps, navegador: fus.navegador }
+    } catch (e) {
+      logger.warn('No se pudo migrar la configuración multimedia', { error: e.message })
+      return false
+    }
   }
 
   async init() {
@@ -93,24 +116,97 @@ export class MultimediaController extends EventEmitter {
     logger.info('MultimediaController v2 listo')
   }
 
-  /** Políticas por app desde config (con defaults). */
+  /**
+   * Fusiona las claves antiguas "youtube" y "chrome" en el control único
+   * "navegador" (mismo proceso de audio en Windows).
+   * - "reduce 0%" equivale a "ignorar" (no baja nada).
+   * - Si alguna de las dos estaba activa (pausar/reducir con % > 0), gana esa.
+   */
+  _fusionarNavegador(apps) {
+    const legacy = [apps.youtube, apps.chrome].filter(Boolean)
+    if (!legacy.length) return null
+    const norm = p => {
+      if (!p) return null
+      if (p.mode === 'reduce' && !(p.percentage > 0)) return { ...p, mode: 'ignore', percentage: 0 }
+      return p
+    }
+    const l = legacy.map(norm).filter(Boolean)
+    const activa = l.find(p => p.mode !== 'ignore') || l[0] || { mode: 'ignore' }
+    const navegador = {
+      mode: activa.mode,
+      percentage: activa.mode === 'reduce' ? Math.max(0, Math.min(100, activa.percentage ?? 0)) : 0,
+      processNames: ['chrome'],
+      matchUrl: 'youtube.com',
+      pauseSupported: true,
+    }
+    return { navegador, legacy }
+  }
+
+  /**
+   * Políticas por app desde config (con defaults).
+   *
+   * YouTube y Chrome son el MISMO proceso de audio en Windows (el audio de YouTube
+   * sale por la sesión de Chrome), así que se controlan con UNA sola entrada:
+   * "navegador" (Chrome / YouTube). Dos controles sobre el mismo proceso solo
+   * generaban conflictos (p.ej. uno en "ignorar" y otro en "reducir").
+   *
+   * Modos del control único:
+   *   - pausar  → pausa el video de YouTube de forma selectiva, no toca el volumen
+   *   - reducir → baja el volumen de Chrome (y por tanto el de YouTube)
+   *   - ignorar → no se toca nada
+   */
   getAppPolicies() {
     const apps = this.config.multimedia?.applications || {}
-    // defaults: youtube→pause, chrome→reduce 30%, spotify/vlc→ignore
     const defaults = {
-      youtube: { mode: 'pause', percentage: 100, processNames: ['chrome'], matchUrl: 'youtube.com', pauseSupported: true },
-      chrome: { mode: 'reduce', percentage: 30, processNames: ['chrome'], pauseSupported: false },
-      spotify: { mode: 'ignore', percentage: 0, processNames: ['spotify'], pauseSupported: false },
-      vlc: { mode: 'ignore', percentage: 0, processNames: ['vlc'], pauseSupported: false },
+      navegador: {
+        mode: 'pause', percentage: 0, processNames: ['chrome'], matchUrl: 'youtube.com',
+        pauseSupported: true, label: 'Navegador (Chrome / YouTube)',
+      },
+      spotify: { mode: 'ignore', percentage: 0, processNames: ['spotify'], pauseSupported: false, label: 'Spotify' },
+      vlc: { mode: 'ignore', percentage: 0, processNames: ['vlc'], pauseSupported: false, label: 'VLC' },
     }
     const merged = { ...defaults }
-    for (const [k, v] of Object.entries(apps)) merged[k] = { ...(defaults[k] || {}), ...v }
+    const fus = this._fusionarNavegador(apps)
+    if (fus) {
+      merged.navegador = { ...defaults.navegador, ...fus.navegador }
+      this._pendingMigration = true
+    }
+    for (const [k, v] of Object.entries(apps)) {
+      if (k === 'youtube' || k === 'chrome') continue
+      merged[k] = { ...(defaults[k] || {}), ...v }
+    }
     return merged
   }
 
   _isExcluded(processName) {
     const p = (processName || '').toLowerCase()
     return EXCLUDED_PROCESSES.some(e => p.includes(e))
+  }
+
+  /**
+   * Una app en modo IGNORAR bloquea su proceso para TODAS las políticas: es la
+   * misma sesión de audio (p.ej. YouTube y Chrome son el mismo proceso "chrome"),
+   * así que si el usuario pone Chrome en "ignorar" su volumen no debe bajar,
+   * aunque otra app (youtube) pida reducirlo.
+   */
+  _esIgnorada(processName, ignorados) {
+    if (!ignorados || !ignorados.size) return false
+    const p = (processName || '').toLowerCase()
+    for (const n of ignorados) if (p.includes(n)) return true
+    return false
+  }
+
+  /** Nombres de proceso bloqueados por apps en modo "ignorar". */
+  _procesosIgnorados(policies) {
+    const set = new Set()
+    for (const pol of Object.values(policies || {})) {
+      if (pol.mode !== 'ignore') continue
+      for (const n of (pol.processNames || [])) {
+        const s = String(n).trim().toLowerCase()
+        if (s) set.add(s)
+      }
+    }
+    return set
   }
 
   /**
@@ -125,15 +221,14 @@ export class MultimediaController extends EventEmitter {
     this._duckedThisCycle.clear() // ciclo nuevo: las sesiones pueden duckearse de nuevo
     const policies = this.getAppPolicies()
     logger.info('Aplicando políticas multimedia por app', { source: utterance?.source })
-    // Si YouTube está en modo PAUSAR, su contenido se va a pausar: entonces NO hace
-    // falta bajar el volumen de Chrome (y bajarlo dejaría el audio bajo al reanudar).
-    // Si YouTube está en modo REDUCIR, el volumen de Chrome se baja SIEMPRE.
-    const youtubePausa = policies.youtube?.mode === 'pause'
-    // El estado de reproducción se mide ANTES de aplicar políticas: si se pausa
-    // YouTube primero, la consulta posterior ya no lo ve "reproduciendo" y Chrome
-    // se bajaría cuando no debe. Si Chrome tiene un video (reproduciendo o pausado),
-    // el modo "pausar" lo gestiona: no se baja su volumen.
-    const chromeMedia = await this._estadoMediaChrome()
+    // Control único del navegador: PAUSAR (pausa el video de YouTube, no toca el
+    // volumen) | REDUCIR (baja el volumen de Chrome/Youtube) | IGNORAR (no toca nada).
+    // Una app en modo IGNORAR bloquea su proceso para TODAS las políticas
+    // (defensa extra: con el control único no suele hacer falta).
+    const ignorados = this._procesosIgnorados(policies)
+    if (ignorados.size) {
+      logger.info('Procesos bloqueados por modo IGNORAR', { procesos: [...ignorados] })
+    }
 
     for (const [appKey, pol] of Object.entries(policies)) {
       const state = { mode: pol.mode, percentage: pol.percentage, snapshots: new Map(), duckedVol: new Map(), pausedTabs: new Set(), pauseSupported: pol.pauseSupported !== false }
@@ -143,7 +238,7 @@ export class MultimediaController extends EventEmitter {
         if (pol.mode === 'ignore') continue
 
         if (pol.mode === 'pause') {
-          if (appKey === 'youtube' || pol.matchUrl) {
+          if (pol.matchUrl) {
             const r = await this._youtube.pauseYouTube(pol.matchUrl)
             state.pausedTabs = new Set(this._youtube.pausedByUs)
             state.pausedMedia = this._youtube.pausedMedia?.length || 0 // pausa vía GSMTC (fallback)
@@ -163,11 +258,10 @@ export class MultimediaController extends EventEmitter {
         if (pol.mode === 'reduce') {
           const pct = Math.max(0, Math.min(100, pol.percentage ?? 0))
           if (pct === 0) continue
-          // Solo Chrome se salta cuando YouTube está en modo PAUSAR y hay un video
-          // presente (el contenido se pausa/reanuda selectivamente).
-          const skipIfPlaying = youtubePausa && /chrome/i.test(appKey) && chromeMedia.tieneMedia
-          state.skipIfPlaying = skipIfPlaying
-          await this._duckAppSessions(appKey, pol, state, pct, { skipIfPlaying })
+          // Control único: si el modo es REDUCIR, el volumen baja SIEMPRE (haya o no
+          // video). Para no bajar el volumen del navegador hay que usar PAUSAR
+          // (pausa el video) o IGNORAR.
+          await this._duckAppSessions(appKey, pol, state, pct, { ignorados })
         }
       } catch (e) {
         logger.warn(`Política de ${appKey} falló (non-fatal)`, { error: e.message })
@@ -329,9 +423,12 @@ export class MultimediaController extends EventEmitter {
   async _duckAppSessions(appKey, pol, state, pct, opts = {}) {
     if (!this._audioBridge?.available) { state.stub = true; return }
     const sessions = await this._audioBridge.listSessions()
+    const ignorados = opts.ignorados || this._procesosIgnorados(this.getAppPolicies())
     const targets = (sessions.sessions || []).filter(s =>
       pol.processNames?.some(n => s.ProcessName?.toLowerCase().includes(n.toLowerCase())) &&
-      !this._isExcluded(s.ProcessName)
+      !this._isExcluded(s.ProcessName) &&
+      // Una app en IGNORAR bloquea su proceso para todas las políticas.
+      !this._esIgnorada(s.ProcessName, ignorados)
     )
     // REGLA: el volumen de Chrome NO se baja solo cuando el contenido de YouTube
     // está en modo PAUSAR (o sea, se va a pausar: bajarlo no aporta nada y deja
@@ -491,6 +588,7 @@ export class MultimediaController extends EventEmitter {
       )
       apps.push({
         appKey,
+        label: pol.label || appKey,
         mode: pol.mode || 'ignore',
         percentage: pol.percentage ?? 0,
         processNames: pol.processNames || [],
@@ -507,11 +605,38 @@ export class MultimediaController extends EventEmitter {
         } : { active: false, duckedCount: 0, pausedTabs: 0, pausedMedia: 0, pauseMethod: null, stub: !this._audioBridge?.available },
       })
     }
+    // Conflictos: dos apps sobre el MISMO proceso de audio. Si una está en IGNORAR,
+    // bloquea el proceso para las demás (no se puede bajar Chrome y YouTube a la vez:
+    // en Windows el audio de YouTube sale por la sesión de Chrome).
+    const porProceso = new Map()
+    for (const [appKey, pol] of Object.entries(policies)) {
+      for (const n of (pol.processNames || [])) {
+        const k = String(n).toLowerCase()
+        if (!porProceso.has(k)) porProceso.set(k, [])
+        porProceso.get(k).push({ appKey, mode: pol.mode, percentage: pol.percentage ?? 0 })
+      }
+    }
+    const conflicts = []
+    for (const [proc, list] of porProceso) {
+      if (list.length < 2) continue
+      const ignorada = list.find(x => x.mode === 'ignore')
+      if (!ignorada) continue
+      const otras = list.filter(x => x.appKey !== ignorada.appKey)
+      conflicts.push({
+        process: proc,
+        ignoredApp: ignorada.appKey,
+        blockedApps: otras.map(x => x.appKey),
+        message: `"${ignorada.appKey}" está en IGNORAR: su proceso (${proc}) NO baja de volumen, ` +
+          `aunque ${otras.map(x => `"${x.appKey}"`).join(' y ')} lo pidan — en Windows ` +
+          `${otras.map(x => `"${x.appKey}"`).join(' y ')} usan el mismo proceso de audio (${proc}).`,
+      })
+    }
     return {
       audioBridgeAvailable: this._audioBridge?.available || false,
       youtubeControllerAvailable: !!this._youtube,
       active: this.active,
       excludedProcesses: EXCLUDED_PROCESSES,
+      conflicts,
       apps,
     }
   }

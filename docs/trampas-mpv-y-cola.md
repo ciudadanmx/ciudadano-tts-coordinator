@@ -370,7 +370,52 @@ locución nueva (sessionTitle enviado = "ed00cf7a"):
 cola: dsh1 → "Read-only diagnostic of the existing…" | dany → "Publia dev" | dsh2 → "# MISIÓN: CIUDADAN MEDIA PLAYER,"
 ```
 
-## 16. Checklist antes de dar por terminado
+## 16. Un solo control para Chrome / YouTube (2026-11-08)
+
+Síntoma: el usuario puso **Chrome en "ignorar"** y el volumen **seguía bajando**.
+
+### Por qué
+
+En Windows **el audio de YouTube sale por la sesión de audio de Chrome**: es el
+**mismo proceso** (`chrome.exe`). El panel tenía **dos** controles sobre ese
+proceso:
+
+- `youtube` → `processNames: ["chrome"]`
+- `chrome` → `processNames: ["chrome"]`
+
+Con `youtube = reducir 87%` y `chrome = ignorar`, la política de YouTube duckeaba
+el proceso **Chrome** igualmente: el "ignorar" de Chrome no lo detenía.
+
+### Solución: un control único
+
+Se fusionaron en **una sola entrada `navegador` ("Navegador (Chrome / YouTube)")**:
+
+| Modo | Efecto |
+|---|---|
+| **Pausar** | pausa el video de YouTube (GSMTC/CDP) y lo reanuda al terminar — **no baja el volumen** |
+| **Reducir X%** | baja el volumen de Chrome (y por tanto el de YouTube) a `100 − X`% |
+| **Ignorar** | no se toca nada |
+
+- `getAppPolicies()` fusiona las claves legacy `youtube` + `chrome` → `navegador`;
+  `"reduce 0%"` se normaliza a `"ignorar"`; si una de las dos estaba activa
+  (pausar/reducir con % > 0) gana esa.
+- La migración se **persiste** al arrancar (`persistMigration()` + `saveConfig`),
+  así la config y el panel quedan con una sola fila.
+- La API acepta `youtube`/`chrome` como alias de `navegador` (compatibilidad).
+- Defensa extra: una app en **ignorar** bloquea su proceso para *todas* las
+  políticas (`_procesosIgnorados` / `_esIgnorada`).
+- El panel avisa si dos apps comparten proceso y una está en ignorar (`conflicts`).
+
+### Verificado (con video reproduciéndose en Chrome)
+
+```
+CASO 1 - PAUSAR:    chrome 100% | Chrome status 4 → 5 (pausado) → 4 (reanudado)
+CASO 2 - REDUCIR 87: chrome 13%  | el video sigue reproduciéndose (4) → chrome 100% al final
+CASO 3 - IGNORAR:    chrome 100% | el video no se toca (4)
+Spotify (su propia config, reducir 30): 70% durante → 100% entre locuciones
+```
+
+## 17. Checklist antes de dar por terminado
 
 1. `node --check` de todos los `.js` modificados + `python -m py_compile` de los `.py`.
 2. Copiar al runtime: `%TEMP%\ciudadan-tts-coordinator\`.
