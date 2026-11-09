@@ -474,19 +474,23 @@ export class UtteranceQueue extends EventEmitter {
         if (lockBeat) { clearInterval(lockBeat); lockBeat = null }
         this.playing = null
         this._releaseLock()
-        // 5. Restaurar multimedia ENTRE locuciones (no entre fragmentos de la misma
-        //    intervención). Así, mientras se sintetiza la siguiente, las apps quedan
-        //    con su volumen real y el contenido pausado vuelve a sonar.
+        // 5. Restaurar multimedia ENTRE locuciones. El contenido pausado (video de
+        //    YouTube) SE REANUDA SIEMPRE entre una locución y la siguiente, para que
+        //    no quede pausado durante toda la cola.
+        //    - Entre locuciones de intervenciones distintas: se restaura todo
+        //      (volúmenes + reanudación).
+        //    - Entre fragmentos de la MISMA intervención: solo se reanuda el pause;
+        //      el volumen se mantiene reducido (evita picos de audio entre
+        //      fragmentos). La siguiente locución vuelve a pausar el video.
         //    Va EN CADENA y sin bloquear: el siguiente _process espera a que termine
         //    (await this._restoreChain) antes de aplicar su propio ducking.
         if (multimedia) {
           const next = this._next()
           const mismoFragmento = !!(next && next.interventionId && next.interventionId === utterance.interventionId)
-          if (!mismoFragmento) {
-            this._restoreChain = Promise.resolve(this._restoreChain)
-              .then(() => multimedia.restoreVolumes())
-              .catch(e => logger.warn('Multimedia restore failed (non-fatal)', { error: e.message }))
-          }
+          const opts = mismoFragmento ? { soloPausa: true } : {}
+          this._restoreChain = Promise.resolve(this._restoreChain)
+            .then(() => multimedia.restoreVolumes(opts))
+            .catch(e => logger.warn('Multimedia restore failed (non-fatal)', { error: e.message }))
         }
       }
     } catch (e) {
@@ -679,6 +683,9 @@ export class UtteranceQueue extends EventEmitter {
       .filter(Boolean)
       .map(u => ({
         requestId: u.requestId,
+        interventionId: u.interventionId,
+        fragmentIndex: u.fragmentIndex,
+        totalFragments: u.totalFragments,
         source: u.source,
         sessionId: u.sessionId,
         sessionTitle: u.sessionTitle,

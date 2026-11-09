@@ -35,6 +35,8 @@ const SNAPSHOT_FILE = join(homedir(), '.ciudadan-tts-coordinator', 'duck-snapsho
 // ducking: si no, tomaría el valor ya reducido como "original" (70% -> 49% -> ...)
 // y el volumen nunca volvería a 100.
 const ORIGINALS_FILE = join(homedir(), '.ciudadan-tts-coordinator', 'volume-originals.json')
+// Contenido multimedia que pausamos y quedó pendiente de reanudar (sobrevive reinicios)
+const PAUSED_FILE = join(homedir(), '.ciudadan-tts-coordinator', 'paused-media.json')
 
 export class MultimediaController extends EventEmitter {
   constructor(config) {
@@ -110,6 +112,9 @@ export class MultimediaController extends EventEmitter {
     try {
       this._youtube = new YouTubeController(this.config, this._audioBridge)
       logger.info('YouTube Controller listo (CDP puerto ' + this._youtube.cdpPort + ')')
+      // Recuperación ante reinicio: si quedó contenido multimedia pausado por nosotros,
+      // reanudarlo (si no, el video se queda pausado para siempre).
+      await this._recoverPausedMedia()
     } catch (e) {
       logger.warn('YouTube Controller no disponible', { error: e.message })
     }
@@ -215,8 +220,11 @@ export class MultimediaController extends EventEmitter {
    */
   async applyDucking(utterance) {
     if (this.active) return // ya activo — no re-aplicar entre fragmentos
-    // Si quedó un snapshot pendiente (crash o restore interrumpido), limpiar antes de tomar prev nuevos
-    await this._recoverPendingSnapshot()
+    // Si quedó un snapshot pendiente (crash o restore interrumpido), limpiar antes
+    // de tomar prev nuevos. Solo si no hay pendientes en memoria: si los hay, el
+    // snapshot es redundante y restaurarlo aquí subiría el volumen a 100% entre
+    // fragmentos (pico de audio).
+    if (this._pendingRestore.size === 0) await this._recoverPendingSnapshot()
     this.active = true
     this._duckedThisCycle.clear() // ciclo nuevo: las sesiones pueden duckearse de nuevo
     const policies = this.getAppPolicies()
@@ -246,6 +254,7 @@ export class MultimediaController extends EventEmitter {
             state.pauseSupported = true
             this._mediaCache = null // el estado de reproducción cambió (caché obsoleta)
             logger.info(`[${appKey}] pausa selectiva`, { ...r, matchUrl: pol.matchUrl })
+            this._savePausedMedia()
             this.emit('appPaused', { appKey, ...r })
           } else {
             // app sin pausa selectiva
@@ -297,6 +306,52 @@ export class MultimediaController extends EventEmitter {
 
   _clearSnapshot() {
     try { if (existsSync(SNAPSHOT_FILE)) unlinkSync(SNAPSHOT_FILE) } catch {}
+  }
+
+  /** Persiste qué contenido multimedia pausamos (para poder reanudarlo tras un reinicio). */
+  _savePausedMedia() {
+    try {
+      const titles = (this._youtube?.pausedMedia || []).map(p => p.title).filter(Boolean)
+      // Si esta pausa no capturó nada (el contenido ya estaba pausado por nosotros),
+      // NO se borra el registro anterior: si el proceso muere, hay que poder
+      // reanudarlo. El archivo se borra al reanudar de verdad (_clearPausedMedia).
+      if (!titles.length) return
+      mkdirSync(join(homedir(), '.ciudadan-tts-coordinator'), { recursive: true })
+      writeFileSync(PAUSED_FILE, JSON.stringify({ savedAt: Date.now(), titles }), { mode: 0o600 })
+    } catch (e) { logger.warn('No se pudo persistir el contenido pausado', { error: e.message }) }
+  }
+
+  _clearPausedMedia() {
+    try { if (existsSync(PAUSED_FILE)) unlinkSync(PAUSED_FILE) } catch {}
+  }
+
+  /** Títulos del contenido multimedia que pausamos y quedó pendiente de reanudar. */
+  _pausadosRegistrados() {
+    try {
+      if (!existsSync(PAUSED_FILE)) return []
+      const data = JSON.parse(readFileSync(PAUSED_FILE, 'utf8'))
+      return Array.isArray(data.titles) ? data.titles : []
+    } catch { return [] }
+  }
+
+  /**
+   * Al iniciar: si quedamos con contenido multimedia pausado (el proceso murió o se
+   * reinició antes de reanudar), se reanuda para que no quede pausado para siempre.
+   */
+  async _recoverPausedMedia() {
+    try {
+      if (!existsSync(PAUSED_FILE)) return
+      const data = JSON.parse(readFileSync(PAUSED_FILE, 'utf8'))
+      const titles = data.titles || []
+      if (!titles.length) { this._clearPausedMedia(); return }
+      if (!this._audioBridge?.available) {
+        logger.warn('Bridge de audio no disponible — el contenido pausado se conserva para reintentar')
+        return
+      }
+      const r = await this._youtube.resumeByTitles(titles)
+      logger.warn('Contenido pausado pendiente (reinicio previo) — reanudado', { reanudados: r.resumed, titulos: titles })
+      this._clearPausedMedia()
+    } catch (e) { logger.warn('Recuperación de contenido pausado falló (non-fatal)', { error: e.message }) }
   }
 
   /** Carga los volúmenes originales conocidos (persistidos en disco). */
@@ -512,18 +567,32 @@ export class MultimediaController extends EventEmitter {
    * Restaura TODO al terminar la secuencia (o ante cancelación/error).
    * Respeta cambios manuales: si el volumen actual ya no es el ducked, no se pisa.
    */
-  async restoreVolumes() {
+  /**
+   * Restaura el estado multimedia.
+   * - Normal: restaura volúmenes y reanuda lo pausado.
+   * - `soloPausa: true`: usado ENTRE FRAGMENTOS de la misma intervención. El
+   *   volumen se queda reducido (sin picos de audio entre fragmentos) pero el
+   *   contenido pausado (video de YouTube) SE REANUDA, para que no quede pausado
+   *   durante toda la cola. La siguiente locución vuelve a pausarlo.
+   */
+  async restoreVolumes(opts = {}) {
+    const soloPausa = !!opts.soloPausa
     this._stopRescan()
     const hayPendientes = this._pendingRestore.size > 0
-    if (!this.active && !hayPendientes) return
+    const hayPausas = this._pausadosRegistrados().length > 0 ||
+      [...this.appStates.values()].some(s =>
+        s.mode === 'pause' && (s.pausedTabs?.size || s.pausedMedia || this._youtube?.pausedMedia?.length))
+    if (!soloPausa && !this.active && !hayPendientes) return
+    if (soloPausa && !hayPausas) return
     this.active = false
-    logger.info('Restaurando estado multimedia por app', { pendientes: hayPendientes })
+    logger.info('Restaurando estado multimedia por app', { pendientes: hayPendientes, soloPausa })
 
     // 1) Volúmenes PENDIENTES de restaurar (registro global: sobrevive a cambios de
     //    configuración y a fallos previos). Antes el snapshot vivía en el estado de la
     //    app y se perdía al reemplazarla -> el volumen quedaba bajo para siempre
     //    (YouTube/Chrome se quedó en 8% y nunca volvía a 100).
-    if (this._audioBridge?.available) {
+    //    Con soloPausa NO se tocan los volúmenes (se mantienen reducidos).
+    if (!soloPausa && this._audioBridge?.available) {
       for (const [pid, info] of [...this._pendingRestore.entries()]) {
         try {
           const current = await this._audioBridge.getVolumeByPid(pid)
@@ -542,10 +611,11 @@ export class MultimediaController extends EventEmitter {
           logger.warn(`[${info.appKey}] no se pudo restaurar pid ${pid}`, { error: e.message })
         }
       }
-    } else {
+      this._saveOriginals()
+    } else if (!soloPausa) {
       this._pendingRestore.clear()
+      this._saveOriginals()
     }
-    this._saveOriginals()
     for (const [appKey, state] of this.appStates) {
       try {
         // El restore de volúmenes ya se hizo arriba con el registro global de
@@ -554,9 +624,22 @@ export class MultimediaController extends EventEmitter {
         // Cubrir AMBOS caminos: pestañas CDP (pausedTabs) y sesiones GSMTC (pausedMedia
         // en el YouTubeController) — antes sólo se miraba pausedTabs y la pausa por
         // fallback GSMTC nunca se reanudaba.
-        if (state.mode === 'pause' && this._youtube &&
-            (state.pausedTabs?.size || state.pausedMedia || this._youtube.pausedMedia?.length)) {
-          const r = await this._youtube.resumeYouTube()
+        //
+        // Además se consulta el REGISTRO PERSISTIDO (paused-media.json): si el video ya
+        // estaba pausado por nosotros, esta pausa captura 0 sesiones y, sin el
+        // registro, el video se quedaba pausado para siempre.
+        const titulos = this._pausadosRegistrados()
+        const debeReanudar = state.mode === 'pause' && this._youtube &&
+          (state.pausedTabs?.size || state.pausedMedia || this._youtube.pausedMedia?.length || titulos.length)
+        if (debeReanudar) {
+          let r = await this._youtube.resumeYouTube()
+          // Si no se reanudó nada (el contenido ya estaba pausado por nosotros y esta
+          // pausa no capturó sesiones), se reanuda por el registro persistido.
+          if (!r.resumed && titulos.length) {
+            const r2 = await this._youtube.resumeByTitles(titulos)
+            r = { ...r, resumed: (r.resumed || 0) + (r2.resumed || 0), errors: [...(r.errors || []), ...(r2.errors || [])] }
+          }
+          if (r.resumed) this._clearPausedMedia()
           this._mediaCache = null // el estado de reproducción cambió (caché obsoleta)
           logger.info(`[${appKey}] reanudación selectiva tras locución`, r)
           this.emit('appResumed', { appKey, ...r })
@@ -567,7 +650,7 @@ export class MultimediaController extends EventEmitter {
     }
     this.appStates.clear()
     this._duckedThisCycle.clear()
-    this._clearSnapshot()
+    if (!soloPausa) this._clearSnapshot()
     this.emit('volumesRestored')
   }
 

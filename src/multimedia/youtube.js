@@ -121,10 +121,16 @@ export class YouTubeController {
   }
 
   async resumeYouTube(matchUrl = 'youtube.com') {
-    if (!this.config.multimedia?.youtube?.resumeAutomatically && matchUrl === 'youtube.com') {
+    // Reanudación automática: se puede desactivar explícitamente, pero por defecto
+    // es TRUE. Antes se miraba `config.multimedia.youtube.resumeAutomatically`,
+    // clave que ya no existe (ahora el control es "navegador"): si faltaba, el
+    // bloque se activaba y el contenido pausado NUNCA se reanudaba.
+    const mm = this.config.multimedia || {}
+    const auto = mm.navegador?.resumeAutomatically ?? mm.youtube?.resumeAutomatically ?? true
+    if (auto === false) {
       this.pausedByUs.clear()
       this.pausedMedia = []
-      return { resumed: 0 }
+      return { resumed: 0, disabled: true }
     }
     let resumed = 0
     const errors = []
@@ -180,8 +186,44 @@ export class YouTubeController {
     return out
   }
 
-  async mediaStatus() {
-    if (!this._audioBridge?.available) return { available: false }
+  /**
+   * Reanuda sesiones multimedia concretas por título (GSMTC).
+   * Se usa en la recuperación tras reinicio: el contenido que pausamos puede
+   * haberse quedado pausado si el proceso murió antes de restaurarlo.
+   */
+  async resumeByTitles(titles = []) {
+    if (!this._audioBridge?.available || !titles.length) return { resumed: 0, errors: [] }
+    let resumed = 0
+    const errors = []
+    for (const title of titles) {
+      try {
+        const r = await this._audioBridge._call({ action: 'media-resume', app: 'chrome', title, onlyPlaying: false })
+        const ok = (r.resumed || []).filter(p => p.ok).length
+        resumed += ok
+        if (ok) logger.info('GSMTC: sesión reanudada tras reinicio', { title })
+      } catch (e) {
+        errors.push(`${title}: ${e.message}`)
+      }
+    }
+    // Fallback: si el título no coincidió (p.ej. caracteres especiales), se reanuda
+    // la sesión multimedia pausada de Chrome sin filtrar. Solo se usa en la
+    // recuperación tras reinicio, donde sabemos que la pausa fue nuestra.
+    if (resumed === 0) {
+      try {
+        const r = await this._audioBridge._call({ action: 'media-resume', app: 'chrome', title: '', onlyPlaying: false })
+        const ok = (r.resumed || []).filter(p => p.ok).length
+        if (ok) {
+          resumed += ok
+          logger.warn('GSMTC: reanudación por título no coincidió — se reanudó la sesión pausada de Chrome', { reanudados: ok })
+        }
+      } catch (e) {
+        errors.push('fallback: ' + e.message)
+      }
+    }
+    return { resumed, errors }
+  }
+
+  async mediaStatus() {    if (!this._audioBridge?.available) return { available: false }
     try {
       const r = await this._audioBridge._call({ action: 'media-list' })
       return { available: true, sessions: r.sessions || [] }

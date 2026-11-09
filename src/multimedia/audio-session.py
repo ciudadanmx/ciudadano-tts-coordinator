@@ -1,6 +1,15 @@
 import sys, json
 from pycaw.pycaw import AudioUtilities
 
+# --- UTF-8 obligatorio: en Windows la consola usa cp1252 y los títulos con acentos
+# --- o el guion largo (—) se corrompen al leer las peticiones de stdin, lo que
+# --- hacía que la reanudación por título no encontrara la sesión pausada.
+for _stream in ('stdin', 'stdout', 'stderr'):
+    try:
+        getattr(sys, _stream).reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 # --- Media control (GSMTC) vía winrt — pausa/reanuda apps con sesión multimedia (YouTube en Chrome sin CDP) ---
 def _gsmtc():
     import asyncio

@@ -415,7 +415,43 @@ CASO 3 - IGNORAR:    chrome 100% | el video no se toca (4)
 Spotify (su propia config, reducir 30): 70% durante → 100% entre locuciones
 ```
 
-## 17. Checklist antes de dar por terminado
+## 18. El video se quedaba pausado durante toda la cola (2026-11-08)
+
+Síntoma: con el control en modo **Pausar**, el video de YouTube se quedaba pausado
+durante toda la cola. Antes se reanudaba entre una locución y otra.
+
+### Causas (4)
+
+1. **Entre fragmentos de la misma intervención no se restauraba nada.** El diseño
+   anterior omitía el restore por completo entre fragmentos (para no encadenar
+   reducciones de volumen) → el video quedaba pausado durante toda la respuesta.
+   **Fix:** `restoreVolumes({ soloPausa: true })` → entre fragmentos se **reanuda el
+   contenido pausado** pero el volumen **se mantiene reducido** (sin picos de audio).
+2. **Si el video ya estaba pausado por nosotros**, la nueva pausa captura 0 sesiones
+   (`onlyPlaying` + ya pausado) → la condición de reanudación no se cumplía → nunca
+   se reanudaba. **Fix:** registro persistido `paused-media.json` + reanudar por
+   título (`resumeByTitles`) con fallback.
+3. **Si el proceso moría con el video pausado**, al reiniciar quedaba pausado para
+   siempre (el estado de pausa no sobrevivía). **Fix:** `_savePausedMedia()` +
+   `_recoverPausedMedia()` en el arranque → reanuda lo que quedó pendiente.
+4. **Títulos con caracteres especiales no coincidían al reanudar**: el daemon leía
+   stdin con cp1252 → el `—` de "título — artista" se corrompía. **Fix:** UTF-8
+   forzado en `audio-session.py` (stdin/stdout/stderr).
+
+Extra: `resumeYouTube()` miraba `config.multimedia.youtube.resumeAutomatically`
+(clave que ya no existe tras la fusión) → si faltaba, la reanudación se desactivaba
+en silencio. **Fix:** mira `navegador` y por defecto reanuda (`?? true`).
+
+### Verificado
+
+```
+3 fragmentos de la MISMA intervención:
+  chrome=5 (pausado) -> chrome=4 (SONANDO) -> chrome=5 (pausado) -> chrome=4 (SONANDO)
+Crash real (servidor muerto con el video pausado) -> al reiniciar:
+  chrome=SONANDO (4) | paused-media.json eliminado | todas las apps al 100%
+```
+
+## 19. Checklist antes de dar por terminado
 
 1. `node --check` de todos los `.js` modificados + `python -m py_compile` de los `.py`.
 2. Copiar al runtime: `%TEMP%\ciudadan-tts-coordinator\`.
