@@ -3,6 +3,7 @@
 
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, mkdir, readdir, stat, unlink } from 'node:fs/promises'
+import { statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -15,12 +16,23 @@ export class EdgeSynthesizer {
   constructor(config) {
     this.config = config
     this.bin = config.synthesis?.edgeBin || 'edge-tts'
-    this.timeoutMs = config.synthesis?.timeoutMs || 60000
+    // El lanzador `edge-tts.exe` es un WRAPPER que lanza python.exe como hijo:
+    // si el hijo se queda colgado, el wrapper nunca cierra y la cola se atasca
+    // (además el hijo huérfano no se puede identificar). Se usa el MÓDULO
+    // directamente (python -m edge_tts) cuando hay un python configurado.
+    this.python = config.synthesis?.edgePython || ''
+    this.timeoutMs = config.synthesis?.timeoutMs || 30000
     this.cacheDir = config.synthesis?.cacheDir || join(tmpdir(), 'ciudadan-tts-cache')
     this.cacheEnabled = config.synthesis?.cacheEnabled !== false
     this.cacheMaxBytes = (config.synthesis?.cacheMaxMb || 200) * 1024 * 1024
     this._catalogCache = null
     this._ensureCacheDir()
+  }
+
+  /** Comando real de síntesis: [python, -m, edge_tts, ...] o el binario directo. */
+  _cmd(args) {
+    if (this.python) return { file: this.python, args: ['-m', 'edge_tts', ...args] }
+    return { file: this.bin, args }
   }
 
   async _ensureCacheDir() {
@@ -117,34 +129,105 @@ export class EdgeSynthesizer {
       const args = textFile
         ? ['--voice', voice, '--file', textFile, '--write-media', outFile]
         : ['--voice', voice, '--text', text, '--write-media', outFile]
-      logger.debug('Spawning edge-tts', { voice, textLen: text.length })
-      const proc = spawn(this.bin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      const cmd = this._cmd(args)
+      logger.debug('Spawning edge-tts', { voice, textLen: text.length, cmd: cmd.file })
+      const proc = spawn(cmd.file, cmd.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       const errChunks = []
+      let settled = false
+      const finish = (fn, arg) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        fn(arg)
+      }
       const timer = setTimeout(() => {
-        try { proc.kill('SIGKILL') } catch { /* gone */ }
-        reject(new Error(`edge-tts timeout after ${this.timeoutMs}ms (voice: ${voice})`))
+        // edge-tts.exe es un WRAPPER que lanza python.exe como hijo: en Windows
+        // matar el wrapper NO mata al hijo, que queda huérfano y bloquea la
+        // cola (el 'close' nunca llega). Por eso:
+        //   1) se mata el ÁRBOL de procesos (taskkill /T /F),
+        //   2) si el MP3 ya estaba escrito y es utilizable, se USA en lugar de
+        //      perder la locución entera.
+        this._killTree(proc)
+        try {
+          const st = statSync(outFile)
+          if (st.size > 1024) {
+            logger.warn('edge-tts no cerró (timeout) pero el audio está completo: se usa', {
+              voice, bytes: st.size, textLen: text.length,
+            })
+            finish(resolve, { timedOut: true, bytes: st.size })
+            return
+          }
+        } catch { /* no hay archivo utilizable */ }
+        finish(reject, new Error(`edge-tts timeout after ${this.timeoutMs}ms (voice: ${voice})`))
       }, this.timeoutMs)
 
       proc.stderr.on('data', (c) => errChunks.push(c))
       proc.on('error', (e) => {
-        clearTimeout(timer)
-        reject(new Error(`edge-tts unavailable: ${e.message}`))
+        finish(reject, new Error(`edge-tts unavailable: ${e.message}`))
       })
       proc.on('close', (code) => {
-        clearTimeout(timer)
         if (code !== 0) {
           const stderr = Buffer.concat(errChunks).toString('utf8').slice(0, 300)
-          reject(new Error(`edge-tts exit ${code}: ${stderr}`))
+          finish(reject, new Error(`edge-tts exit ${code}: ${stderr}`))
           return
         }
-        resolve()
+        finish(resolve)
       })
     })
   }
 
+  /**
+   * Mata el ÁRBOL de procesos de una síntesis (Windows).
+   * edge-tts.exe es un wrapper que lanza python.exe: matar sólo el wrapper deja
+   * al hijo huérfano colgado y bloquea la cola.
+   */
+  _killTree(proc) {
+    try {
+      if (process.platform === 'win32' && proc.pid) {
+        spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+        return
+      }
+      proc.kill('SIGKILL')
+    } catch { /* ya no existe */ }
+  }
+
+  /**
+   * Limpia síntesis huérfanas de ejecuciones anteriores (edge-tts + su python
+   * hijo). Se llama al arrancar el servicio: si el proceso murió con una
+   * síntesis a medias, esos hijos se quedan colgados para siempre y la cola
+   * deja de avanzar (el 'close' del wrapper nunca llega).
+   *
+   * En Windows 11 ya NO existe wmic, así que se usa PowerShell + CIM.
+   */
+  async cleanupOrphans() {
+    if (process.platform !== 'win32') return 0
+    let killed = 0
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const exec = promisify(execFile)
+      // El comando filtra por ProcessName, así que no se mata a sí mismo
+      // (powershell.exe no es edge-tts.exe ni python.exe).
+      const ps = [
+        "Get-CimInstance Win32_Process |",
+        "Where-Object { ($_.Name -eq 'edge-tts.exe' -or $_.Name -eq 'python.exe') -and",
+        "($_.CommandLine -like '*-m edge_tts*' -or $_.CommandLine -like '*ciudadan-edge-*') } |",
+        'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue;',
+        'Write-Output $_.ProcessId }',
+      ].join(' ')
+      const { stdout } = await exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+        windowsHide: true, timeout: 20000,
+      }).catch(() => ({ stdout: '' }))
+      killed = String(stdout || '').trim().split('\n').filter(l => /^\d+$/.test(l.trim())).length
+    } catch { /* sin cleanup */ }
+    if (killed) logger.warn('Síntesis edge-tts huérfanas limpiadas', { count: killed })
+    return killed
+  }
+
   async listVoices() {
     return new Promise((resolve, reject) => {
-      const proc = spawn(this.bin, ['--list-voices'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      const cmd = this._cmd(['--list-voices'])
+      const proc = spawn(cmd.file, cmd.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       const out = []
       proc.stdout.on('data', (c) => out.push(c))
       proc.on('close', (code) => {
@@ -170,7 +253,8 @@ export class EdgeSynthesizer {
       return this._catalogCache.voices
     }
     const voices = await new Promise((resolve, reject) => {
-      const proc = spawn(this.bin, ['--list-voices'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      const cmd = this._cmd(['--list-voices'])
+      const proc = spawn(cmd.file, cmd.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       const out = []
       proc.stdout.on('data', (c) => out.push(c))
       proc.on('close', (code) => {

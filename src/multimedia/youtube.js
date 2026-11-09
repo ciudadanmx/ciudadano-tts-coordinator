@@ -103,21 +103,49 @@ export class YouTubeController {
     } catch (e) {
       logger.warn('CDP no disponible para pausa selectiva — fallback a GSMTC (pausa la sesión multimedia activa de Chrome)', { error: e.message, matchUrl })
       // Fallback: pausar vía GlobalSystemMediaTransportControls (solo sesiones en Playing)
-      if (this._audioBridge?.available) {
-        try {
-          const r = await this._audioBridge._call({ action: 'media-pause', app: 'chrome', title: '', onlyPlaying: true })
-          const paused = r.paused || []
-          this.pausedMedia = paused.filter(p => p.ok)
-          this.lastMethod = 'gsmtc'
-          logger.info('GSMTC: Chrome pausado (sesión multimedia activa)', { count: this.pausedMedia.length, titles: this.pausedMedia.map(p => p.title) })
-          return { paused: this.pausedMedia.length, method: 'gsmtc', titles: this.pausedMedia.map(p => p.title), matchUrl, cdpError: e.message }
-        } catch (e2) {
-          logger.warn('Fallback GSMTC también falló', { error: e2.message })
-          return { paused: 0, error: e.message + ' / gsmtc: ' + e2.message }
-        }
-      }
-      return { paused: 0, error: e.message }
+      return this._pauseViaGsmtc(matchUrl, e.message)
     }
+  }
+
+  /**
+   * Pausa vía GSMTC la sesión multimedia ACTIVA del navegador (la que esté en
+   * estado "Playing"), sea YouTube o cualquier otro sitio (TikTok, etc.).
+   *
+   * Se usa como fallback cuando CDP no encuentra una pestaña que coincida con
+   * matchUrl: el contenido que el usuario realmente está viendo puede no ser
+   * YouTube, y sin este fallback el navegador NUNCA se pausaba (la música
+   * seguía a 100% y la voz se oía tapada).
+   */
+  async _pauseViaGsmtc(matchUrl, cdpError = '') {
+    if (!this._audioBridge?.available) {
+      return { paused: 0, error: cdpError || 'bridge multimedia no disponible' }
+    }
+    try {
+      const r = await this._audioBridge._call({ action: 'media-pause', app: 'chrome', title: '', onlyPlaying: true })
+      const paused = r.paused || []
+      this.pausedMedia = paused.filter(p => p.ok)
+      this.lastMethod = 'gsmtc'
+      logger.info('GSMTC: navegador pausado (sesión multimedia activa)', { count: this.pausedMedia.length, titles: this.pausedMedia.map(p => p.title) })
+      return { paused: this.pausedMedia.length, method: 'gsmtc', titles: this.pausedMedia.map(p => p.title), matchUrl, cdpError }
+    } catch (e2) {
+      logger.warn('Fallback GSMTC también falló', { error: e2.message })
+      return { paused: 0, error: (cdpError ? cdpError + ' / ' : '') + 'gsmtc: ' + e2.message }
+    }
+  }
+
+  /**
+   * Pausa lo que esté reproduciéndose en el navegador, con prioridad al
+   * matchUrl exacto (CDP) y, si no hay coincidencia, al contenido activo.
+   */
+  async pauseBrowser(matchUrl = 'youtube.com') {
+    const r = await this.pauseYouTube(matchUrl)
+    if (r.paused > 0) return r
+    // No hubo coincidencia con matchUrl: el contenido activo puede ser de
+    // otro sitio (TikTok, etc.). Se pausa la sesión multimedia que esté
+    // sonando para que la música no compita con la locución.
+    logger.info('Sin coincidencia con matchUrl: se pausa el contenido activo del navegador', { matchUrl })
+    const g = await this._pauseViaGsmtc(matchUrl)
+    return { ...g, matchUrl, cdpPaused: 0 }
   }
 
   async resumeYouTube(matchUrl = 'youtube.com') {

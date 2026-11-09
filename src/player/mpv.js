@@ -47,7 +47,10 @@ export class MpvPlayer extends EventEmitter {
       '--volume=' + (this.config.player?.volume ?? 300),
       '--volume-max=600',   // sin límite: permite amplificación real >100%
       '--audio-pitch-correction=yes',
-      '--af=loudnorm=I=-14:TP=-1.5:LRA=11',  // normaliza y sube volumen percibido
+      // loudnorm en modo LINEAR: aplica el gain al instante, sin esperar la
+      // medición (3 s). Sin esto, en locuciones cortas el audio salía a
+      // ~-20 LUFS en vez de -14 y se oía "muy bajito".
+      '--af=loudnorm=I=-14:TP=-1.5:LRA=11:linear=true',
     ]
     // No usar audio device del navegador
     args.push('--ao=wasapi' ) // en Windows; en otros sistemas usar el default

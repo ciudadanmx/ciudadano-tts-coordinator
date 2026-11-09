@@ -178,7 +178,14 @@ export class MultimediaController extends EventEmitter {
     }
     for (const [k, v] of Object.entries(apps)) {
       if (k === 'youtube' || k === 'chrome') continue
-      merged[k] = { ...(defaults[k] || {}), ...v }
+      const pol = { ...(defaults[k] || {}), ...v }
+      // "reducir 0%" es "ignorar": se normaliza también la entrada ya fusionada
+      // para que un config heredado no deje la app en un modo ambiguo.
+      if (pol.mode === 'reduce' && !(pol.percentage > 0)) {
+        pol.mode = 'ignore'
+        pol.percentage = 0
+      }
+      merged[k] = pol
     }
     return merged
   }
@@ -247,13 +254,16 @@ export class MultimediaController extends EventEmitter {
 
         if (pol.mode === 'pause') {
           if (pol.matchUrl) {
-            const r = await this._youtube.pauseYouTube(pol.matchUrl)
+            // pauseBrowser: prioriza el matchUrl exacto (CDP) y, si el contenido
+            // activo no es YouTube (TikTok, etc.), pausa la sesión multimedia que
+            // esté sonando. Antes la música seguía a 100% y la voz se oía tapada.
+            const r = await this._youtube.pauseBrowser(pol.matchUrl)
             state.pausedTabs = new Set(this._youtube.pausedByUs)
             state.pausedMedia = this._youtube.pausedMedia?.length || 0 // pausa vía GSMTC (fallback)
             state.pauseMethod = r.method || 'cdp'
             state.pauseSupported = true
             this._mediaCache = null // el estado de reproducción cambió (caché obsoleta)
-            logger.info(`[${appKey}] pausa selectiva`, { ...r, matchUrl: pol.matchUrl })
+            logger.info(`[${appKey}] pausa del navegador`, { ...r, matchUrl: pol.matchUrl })
             this._savePausedMedia()
             this.emit('appPaused', { appKey, ...r })
           } else {
@@ -349,8 +359,16 @@ export class MultimediaController extends EventEmitter {
         return
       }
       const r = await this._youtube.resumeByTitles(titles)
-      logger.warn('Contenido pausado pendiente (reinicio previo) — reanudado', { reanudados: r.resumed, titulos: titles })
-      this._clearPausedMedia()
+      if (r.resumed > 0) {
+        logger.warn('Contenido pausado pendiente (reinicio previo) — reanudado', { reanudados: r.resumed, titulos: titles })
+        this._clearPausedMedia()
+      } else {
+        // NO se borra el registro si no se pudo reanudar: es la única pista de
+        // que el contenido lo pausó el coordinador. Si se borraba, el video
+        // quedaba pausado para siempre (y sin registro no se podía reanudar
+        // ni en los reinicios siguientes).
+        logger.warn('Contenido pausado pendiente (reinicio previo) — no se pudo reanudar todavía, se conserva el registro', { titulos: titles })
+      }
     } catch (e) { logger.warn('Recuperación de contenido pausado falló (non-fatal)', { error: e.message }) }
   }
 
@@ -577,15 +595,22 @@ export class MultimediaController extends EventEmitter {
    */
   async restoreVolumes(opts = {}) {
     const soloPausa = !!opts.soloPausa
+    if (soloPausa) {
+      // Ciclo continuo: el siguiente fragmento es del MISMO TTS. NO se restaura
+      // nada: los volúmenes siguen reducidos, el video sigue pausado y el
+      // estado de ducking sigue vigente. Antes, este camino reanudaba el video
+      // y la música volvía a 100% ENTRE fragmentos ("la música no baja").
+      logger.info('Ciclo continuo: sin restore (volumen reducido y video pausado se mantienen)')
+      return
+    }
     this._stopRescan()
     const hayPendientes = this._pendingRestore.size > 0
     const hayPausas = this._pausadosRegistrados().length > 0 ||
       [...this.appStates.values()].some(s =>
         s.mode === 'pause' && (s.pausedTabs?.size || s.pausedMedia || this._youtube?.pausedMedia?.length))
-    if (!soloPausa && !this.active && !hayPendientes) return
-    if (soloPausa && !hayPausas) return
+    if (!this.active && !hayPendientes && !hayPausas) return
     this.active = false
-    logger.info('Restaurando estado multimedia por app', { pendientes: hayPendientes, soloPausa })
+    logger.info('Restaurando estado multimedia por app', { pendientes: hayPendientes })
 
     // 1) Volúmenes PENDIENTES de restaurar (registro global: sobrevive a cambios de
     //    configuración y a fallos previos). Antes el snapshot vivía en el estado de la

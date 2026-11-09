@@ -28,7 +28,8 @@
   "synthesis": {
     "provider": "edge",
     "edgeBin": "edge-tts",
-    "timeoutMs": 60000,
+    "edgePython": "C:\\Python313\\python.exe",
+    "timeoutMs": 30000,
     "cacheEnabled": true,
     "cacheMaxMb": 200,
     "cacheDir": null

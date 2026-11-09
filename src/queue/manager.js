@@ -211,7 +211,10 @@ export class UtteranceQueue extends EventEmitter {
       playStatus: 'pending', // pending | playing | done | error | skipped
       error: null,
       attempts: 0,
-      maxAttempts: 3,
+      // 2 intentos: con el timeout de síntesis (30 s) el peor caso es ~62 s.
+      // Con 3 intentos la cola se quedaba "sintetizando" más de 3 minutos y
+      // el resto de las locuciones no sonaba (atasco perceived como voz baja).
+      maxAttempts: 2,
     }
     this.items.set(id, utterance)
     this._insertOrdered(id)
@@ -387,11 +390,21 @@ export class UtteranceQueue extends EventEmitter {
       //    pendientes y aplicar ducking ANTES de reproducir
       if (multimedia) {
         try { await this._restoreChain } catch { /* ya manejado */ }
-        try { await multimedia.restoreVolumes() } catch (e) {
-          logger.warn('Multimedia restore previo failed (non-fatal)', { error: e.message })
-        }
-        try { await multimedia.applyDucking(utterance) } catch (e) {
-          logger.warn('Multimedia ducking failed (non-fatal)', { error: e.message })
+        // Ciclo continuo: si esta locución es otro fragmento de la MISMA
+        // intervención (mismo TTS), el ducking y la pausa YA están aplicados.
+        // NO se restaura nada (ni volúmenes ni reanudación del video): antes se
+        // restauraba aquí y la música volvía a 100% y el video se reanudaba
+        // ENTRE fragmentos del mismo TTS ("la música no baja").
+        const continua = !!(utterance.interventionId && utterance.interventionId === this._lastInterventionId)
+        if (continua) {
+          logger.info('Ciclo continuo: se mantiene ducking y pausa', { interventionId: utterance.interventionId })
+        } else {
+          try { await multimedia.restoreVolumes() } catch (e) {
+            logger.warn('Multimedia restore previo failed (non-fatal)', { error: e.message })
+          }
+          try { await multimedia.applyDucking(utterance) } catch (e) {
+            logger.warn('Multimedia ducking failed (non-fatal)', { error: e.message })
+          }
         }
       }
 
@@ -500,6 +513,9 @@ export class UtteranceQueue extends EventEmitter {
             .then(() => multimedia.restoreVolumes(opts))
             .catch(e => logger.warn('Multimedia restore failed (non-fatal)', { error: e.message }))
         }
+        // Marca la intervención en curso: el siguiente fragmento del mismo TTS
+        // mantiene el ducking y la pausa (ciclo continuo, sin restore).
+        this._lastInterventionId = utterance.interventionId || null
       }
     } catch (e) {
       utterance.status = 'error'

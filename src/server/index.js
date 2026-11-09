@@ -405,11 +405,15 @@ route('PUT', '/api/v1/multimedia/apps/:appKey', async (req, res, params) => {
   }
   const pct = Math.max(0, Math.min(100, parseInt(body.percentage ?? 0, 10)))
   if (isNaN(pct)) return sendJson(res, 400, { ok: false, error: 'percentage 0-100 requerido' })
+  // "reducir 0%" ES "ignorar": se persiste como tal para que la config nunca
+  // quede con un modo ambiguo (reducir 0) que el panel muestra como si bajara.
+  const modoFinal = (mode === 'reduce' && pct === 0) ? 'ignore' : mode
+  const pctFinal = modoFinal === 'reduce' ? pct : 0
   const cfg = getConfig()
   if (!cfg.multimedia) cfg.multimedia = {}
   if (!cfg.multimedia.applications) cfg.multimedia.applications = {}
   const existing = cfg.multimedia.applications[appKey] || {}
-  cfg.multimedia.applications[appKey] = { ...existing, mode, percentage: pct }
+  cfg.multimedia.applications[appKey] = { ...existing, mode: modoFinal, percentage: pctFinal }
   if (body.processNames) cfg.multimedia.applications[appKey].processNames = body.processNames
   if (body.matchUrl !== undefined) cfg.multimedia.applications[appKey].matchUrl = body.matchUrl
   if (body.pauseSupported !== undefined) cfg.multimedia.applications[appKey].pauseSupported = body.pauseSupported
@@ -1061,6 +1065,15 @@ function matchRoute(pattern, path) {
 // --- Arranque ---
 async function main() {
   await multimedia.init()
+  // Limpiar síntesis edge-tts huérfanas de una ejecución anterior: si el
+  // proceso murió con una síntesis a medias, el wrapper y su python hijo
+  // quedan colgados y bloquean la cola (el 'close' nunca llega).
+  try {
+    const n = await synthesizer.cleanupOrphans()
+    if (n) logger.warn('Síntesis huérfanas eliminadas al arrancar', { count: n })
+  } catch (e) {
+    logger.warn('No se pudo limpiar las síntesis huérfanas', { error: e.message })
+  }
   // Migración de configuración: YouTube y Chrome son el mismo proceso de audio,
   // así que se funden en un solo control "navegador" (Chrome / YouTube).
   try {

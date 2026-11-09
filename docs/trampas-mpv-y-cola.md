@@ -491,3 +491,109 @@ fuente canónica `claude` (voz `es-AR-TomasNeural`, silenciable desde el panel).
 5. Ráfaga de 3-10 locuciones → todas `done`, duraciones completas, **0 cortes**.
 6. Revisar el log: 0 errores, 0 `Play timeout`, 0 `Lock timeout`.
 7. Panel: `node --check` del script servido + `Ctrl+F5` en el navegador.
+
+## 21. "La música no baja" y "la voz se oye bajita" (2026-11-09)
+
+Cuatro fallos encadenados, todos verificados en vivo. **Léelos antes de tocar
+`src/multimedia/*` o `src/synthesis/edge.js`.**
+
+### 21.1 `reduce 0%` NO es "ignorar": se persistía como `reduce`
+
+Un test interrumpido dejó `navegador: {mode:'reduce', percentage:0}` en la
+config del usuario. Con ese valor la app quedaba **bloqueada por el modo
+ignorar** (el proceso entero queda excluido) y el panel la mostraba como
+"reducir 0%" aunque no reducía nada. Ahora:
+
+- `PUT /api/v1/multimedia/apps/:appKey` normaliza `reduce` + `0%` → `ignore`.
+- `getAppPolicies()` normaliza también las entradas heredadas (no solo las
+  claves legacy `youtube`/`chrome`).
+- **Los tests que tocan la multimedia deben restaurar la config en un
+  `finally`** (`scripts/test-control-unico.py`): si el test se corta a mitad,
+  la política del usuario queda a medias y el navegador deja de pausarse.
+
+### 21.2 La pausa solo cubría YouTube: el fallback GSMTC no se disparaba
+
+`pauseYouTube(matchUrl)` hace fallback a GSMTC **solo si CDP lanza una
+excepción**. Si CDP funciona pero ninguna pestaña coincide con `youtube.com`
+(el caso real: el usuario estaba viendo TikTok), devolvía `paused: 0` y **no
+pausaba nada**: la música seguía al 100% y la voz se oía tapada.
+
+Ahora `pauseBrowser(matchUrl)`:
+1. intenta el matchUrl exacto por CDP (preciso para YouTube);
+2. si no hubo coincidencia → pausa por GSMTC la sesión multimedia **activa**
+   del navegador (sea TikTok o lo que sea).
+
+### 21.3 El ciclo continuo (mismo TTS) se restauraba entre fragmentos
+
+El requisito es: **entre fragmentos de la misma intervención no se restaura**
+ni el volumen ni la pausa. Se cumplía a medias:
+
+- `_process` hacía un `restoreVolumes()` **completo** al inicio de cada
+  locución → el video se reanudaba y la música volvía a 100% entre fragmentos.
+- `restoreVolumes({soloPausa:true})` **reanudaba el video pausado** (el
+  `soloPausa` solo excluía los volúmenes).
+
+Ahora:
+- el `_process` detecta `interventionId`连续 (`_lastInterventionId`) y, si es
+  otro fragmento del mismo TTS, **no restaura y no re-aplica** el ducking;
+- `restoreVolumes({soloPausa:true})` es un **no-op real**: no toca volúmenes,
+  no reanuda el video y mantiene `active`/`appStates` (el panel sigue
+  reflejando el ducking activo).
+
+Verificado: durante toda la locución el navegador queda en estado `5`
+(pausado) y la música al 70%; al terminar ambos vuelven a `4` y `100`.
+
+### 21.4 `edge-tts.exe` es un wrapper: se colgaba y bloqueaba la cola
+
+`edge-tts.exe` (pip) lanza `python.exe` como hijo. Si el hijo se queda
+colgado, **el wrapper nunca cierra** → el `close` no llega → la locución se
+queda en `synthesizing` y, con `maxAttempts: 3`, la cola se quedaba **más de
+3 minutos** sin avanzar (el usuario lo oía como "la voz baja" o directamente
+como silencio).
+
+Síntomas: item en `synthesizing` con `ageMs > 180000`, `lock` viejo, procesos
+`edge-tts.exe` + `python.exe -` vivos.
+
+Solución aplicada:
+- se usa el **módulo directamente**: `python -m edge_tts` (config
+  `synthesis.edgePython`) → el proceso controlado es el real y su command
+  line (`-m edge_tts`) permite identificar y limpiar huérfanos;
+- timeout de síntesis a 30 s y `maxAttempts: 2` (peor caso ~62 s, no 3 min);
+- al vencer el timeout, **si el MP3 ya está escrito y es utilizable se USA**
+  (antes se borraba la carpeta temporal y se perdía la locución entera);
+- `_killTree()` usa `taskkill /PID /T /F` para matar el árbol, no solo el
+  padre;
+- `cleanupOrphans()` al arrancar limpia sintesis colgadas (en Windows 11
+  **ya no existe `wmic`**: se usa PowerShell + `Get-CimInstance`, filtrando
+  por `-m edge_tts` o `ciudadan-edge-`).
+
+### 21.5 El registro de contenido pausado se borraba sin reanudar
+
+`_recoverPausedMedia()` borraba `paused-media.json` aunque `resumeByTitles()`
+no hubiera reanudado nada. Resultado: el video quedaba **pausado para
+siempre** y, sin registro, tampoco se podía recuperar en los reinicios
+siguientes. Ahora el registro **solo se borra si se reanudó de verdad**.
+
+### 21.6 Nivel de audio: el loudnorm sí funciona (medido)
+
+Medido con `ffmpeg` sobre un MP3 real de la cola:
+
+| etapa | LUFS integrated | True peak |
+|---|---|---|
+| MP3 de edge-tts (origen) | **-19.8** | -5.7 dBFS |
+| con `loudnorm=I=-14:TP=-1.5:LRA=11` | **-14.3** | -1.5 dBFS |
+| primeros 2 s con loudnorm | **-13.8** | -1.5 dBFS |
+
+Conclusión: el filtro normaliza correctamente desde el inicio; **el volumen
+"bajito" era la música a 100% por encima** (no se pausaba por 21.2). Aun así
+se añadió `linear=true` al filtro de mpv para que el gain se aplique sin
+esperar la medición, y el volumen interno de mpv (135) **no se toca**: es del
+usuario.
+
+### 21.7 CDP no está disponible en este Chrome
+
+El log muestra `CDP no disponible ... fetch failed`: este Chrome no expone el
+puerto de depuración remoto, así que la pausa **siempre** va por GSMTC. No es
+un fallo: GSMTC pausa y reanuda correctamente. No abrir un puerto de
+depuración en el Chrome del usuario solo para esto.
+
