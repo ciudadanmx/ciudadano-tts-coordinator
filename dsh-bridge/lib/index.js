@@ -97,7 +97,7 @@ export function apply(ctx, config) {
   function getSessionTitle(sessionId) {
     const meta = sessionMeta.get(sessionId)
     if (!meta) return ''
-    // Prioridad: taskTitle > title > displayTitle > cwd basename > sessionId corto
+    // Prioridad: taskTitle > title > displayTitle > cwd basename
     if (meta.taskTitle) return meta.taskTitle
     if (meta.title) return meta.title
     if (meta.displayTitle) return meta.displayTitle
@@ -105,7 +105,9 @@ export function apply(ctx, config) {
       const parts = String(meta.cwd).replace(/\\/g, '/').split('/').filter(Boolean)
       if (parts.length) return parts[parts.length - 1]
     }
-    return String(sessionId || '').slice(0, 8)
+    // NUNCA devolver el sessionId como título: el coordinador lo resuelve desde
+    // el disco del DSH (dsh-titles) y, si no puede, usa un nombre legible.
+    return ''
   }
 
   // Dividir texto en fragmentos para el coordinador

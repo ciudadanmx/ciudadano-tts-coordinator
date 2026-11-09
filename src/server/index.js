@@ -39,18 +39,49 @@ const multimedia = new MultimediaController(config)
 // Un título con U+FFFD ("�") está corrupto por codificación: no se usa para hablar.
 function tituloLimpio(t) {
   if (!t) return ''
-  const s = String(t)
+  const s = String(t).trim()
+  if (!s) return ''
   if (s.includes('\uFFFD')) return ''
   return s
 }
 
-// Nombre mostrado de una sesión: título real del DSH (disco) > título recibido > registro > id limpio
-function displayName(sessionId, receivedTitle) {
+// Un título que realmente es un IDENTIFICADOR de sesión no debe anunciarse:
+// el cliente a veces manda su propio sessionId como fallback ("ed00cf7a",
+// "53be07a5-d84"). Se detecta comparándolo con el sessionId real y por forma.
+function pareceSessionId(t, sessionId) {
+  if (!t) return true
+  const s = String(t).trim()
+  if (!s) return true
+  if (/^session-[\w-]+$/i.test(s)) return true
+  if (/^[0-9a-f]{8}$/i.test(s)) return true
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return true
+  // Formas abreviadas de UUID: "ed00cf7a-b7c1", "53be07a5-d84"
+  if (/^[0-9a-f]{6,8}(-[0-9a-f]{2,4}){1,3}$/i.test(s)) return true
+  // El título es un prefijo/fragmento del sessionId real -> es un id
+  if (sessionId) {
+    const sid = String(sessionId).trim().replace(/^session-/i, '').toLowerCase()
+    const norm = s.toLowerCase().replace(/^session-/i, '')
+    if (norm && sid && (sid === norm || sid.startsWith(norm) || norm.startsWith(sid))) return true
+  }
+  return false
+}
+
+// Nombre mostrado de una sesión: título real del DSH (disco) > título recibido > registro
+// NUNCA un identificador: si no hay título real se usa un nombre legible ("Sesión de DSH1").
+function displayName(sessionId, receivedTitle, source) {
   const fromDsh = tituloLimpio(dshTitles.resolve(sessionId))
-  if (fromDsh) return fromDsh
+  if (fromDsh && !pareceSessionId(fromDsh, sessionId)) return fromDsh
   const reg = tituloLimpio(sessions.resolveDisplayName(sessionId))
-  if (reg) return reg
-  return tituloLimpio(receivedTitle) || ''
+  if (reg && !pareceSessionId(reg, sessionId)) return reg
+  const recv = tituloLimpio(receivedTitle)
+  if (recv && !pareceSessionId(recv, sessionId)) return recv
+  const src = String(source || '').toLowerCase()
+  const legible = src === 'dsh1' ? 'Sesión de DSH1'
+    : src === 'dsh2' ? 'Sesión de DSH2'
+    : src === 'dany' ? 'Sesión de Dany'
+    : src === 'claude-code' ? 'Sesión de Claude Code'
+    : 'Sesión'
+  return legible
 }
 
 const queue = new UtteranceQueue(config, {
@@ -122,7 +153,7 @@ route('GET', '/api/v1/status', async (req, res) => {
   const paused = await player.isPaused().catch(() => false)
   const st = queue.getStatus()
   if (st.current && st.current.sessionId) {
-    st.current = { ...st.current, sessionName: displayName(st.current.sessionId, st.current.sessionTitle) }
+    st.current = { ...st.current, sessionName: displayName(st.current.sessionId, st.current.sessionTitle, st.current.source) }
   }
   sendJson(res, 200, {
     ok: true,
@@ -151,9 +182,9 @@ route('POST', '/api/v1/speech', async (req, res) => {
   }
   // Resolver NOMBRE REAL de la sesión (desde el DSH en disco) para anunciarlo y mostrarlo,
   // en lugar del genérico "session-" que manda el cliente
-  const realName = body.sessionId ? displayName(body.sessionId, body.sessionTitle) : ''
-  const cleanTask = tituloLimpio(cleanTitle(body.taskTitle))
-  const cleanSess = tituloLimpio(cleanTitle(body.sessionTitle))
+  const realName = body.sessionId ? displayName(body.sessionId, body.sessionTitle, body.source) : ''
+  const cleanTask = pareceSessionId(body.taskTitle, body.sessionId) ? '' : tituloLimpio(cleanTitle(body.taskTitle))
+  const cleanSess = pareceSessionId(body.sessionTitle, body.sessionId) ? '' : tituloLimpio(cleanTitle(body.sessionTitle))
   const resolvedTitle = cleanTask || cleanSess || realName || ''
   const request = {
     requestId: body.requestId || randomUUID(),
@@ -179,7 +210,7 @@ route('POST', '/api/v1/speech', async (req, res) => {
 
 // Cola
 route('GET', '/api/v1/queue', (req, res) => {
-  const items = queue.getQueue().map(u => ({ ...u, sessionName: u.sessionId ? displayName(u.sessionId, u.sessionTitle) : '' }))
+  const items = queue.getQueue().map(u => ({ ...u, sessionName: u.sessionId ? displayName(u.sessionId, u.sessionTitle, u.source) : '' }))
   sendJson(res, 200, { ok: true, items, status: queue.getStatus() })
 })
 
@@ -187,7 +218,7 @@ route('GET', '/api/v1/queue', (req, res) => {
 route('GET', '/api/v1/history', (req, res) => {
   const url = new URL(req.url, 'http://localhost')
   const limit = Math.max(1, Math.min(500, parseInt(url.searchParams.get('limit') || '50', 10) || 50))
-  const items = queue.getHistory(limit).map(h => ({ ...h, sessionName: h.sessionId ? displayName(h.sessionId, h.sessionTitle) : '' }))
+  const items = queue.getHistory(limit).map(h => ({ ...h, sessionName: h.sessionId ? displayName(h.sessionId, h.sessionTitle, h.source) : '' }))
   sendJson(res, 200, { ok: true, items, total: (queue.history || []).length })
 })
 
@@ -299,9 +330,9 @@ route('DELETE', '/api/v1/sessions/:sessionId/queue', (req, res, params) => {
 route('GET', '/api/v1/sessions', (req, res) => {
   const list = sessions.getAllSessions().map(s => ({
     ...s,
-    displayName: displayName(s.sessionId, s.displayTitle || s.title), // nombre REAL desde el DSH
+    displayName: displayName(s.sessionId, s.displayTitle || s.title, s.source), // nombre REAL desde el DSH
   }))
-  const qs = queue.getSessions().map(s => ({ ...s, displayName: s.sessionId ? displayName(s.sessionId, s.sessionTitle) : '' }))
+  const qs = queue.getSessions().map(s => ({ ...s, displayName: s.sessionId ? displayName(s.sessionId, s.sessionTitle, s.source) : '' }))
   sendJson(res, 200, { ok: true, sessions: list, queueSessions: qs })
 })
 

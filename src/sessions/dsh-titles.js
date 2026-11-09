@@ -108,7 +108,25 @@ export class DshTitleResolver {
 
   resolve(sessionId) {
     if (!sessionId) return ''
-    return this.titles.get(sessionId) || ''
+    const raw = String(sessionId).trim()
+    if (!raw) return ''
+    const direct = this.titles.get(raw)
+    if (direct) return direct
+    // Normalizar: el cliente puede mandar el UUID puro o con prefijo 'session-',
+    // y en disco puede estar en cualquiera de las dos formas.
+    const variants = new Set([raw])
+    if (raw.startsWith('session-')) variants.add(raw.slice('session-'.length))
+    else variants.add('session-' + raw)
+    for (const v of variants) {
+      const t = this.titles.get(v)
+      if (t) return t
+    }
+    // Último recurso: comparar por UUID sin prefijo
+    const uuid = raw.replace(/^session-/, '')
+    for (const [k, t] of this.titles) {
+      if (k.replace(/^session-/, '') === uuid) return t
+    }
+    return ''
   }
 
   get size() { return this.titles.size }

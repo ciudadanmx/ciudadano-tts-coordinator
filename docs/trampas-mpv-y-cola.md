@@ -320,7 +320,57 @@ CASO B: youtube pausar + chrome reducir 30%
   DESPUES:  chrome 100%  | video reanudado
 ```
 
-## 15. Checklist antes de dar por terminado
+## 15. Títulos de sesión: por qué volvían a salir los IDs (2026-11-08)
+
+Síntoma: las locuciones anunciaban **`ed00cf7a`** (y `53be07a5-d84`) en vez del
+nombre real de la sesión.
+
+### Causa raíz
+
+`src/sessions/read-titles.py` filtraba los directorios de sesión así:
+
+```python
+if not sd.is_dir() or not sd.name.startswith('session-'):   # ← el bug
+    continue
+```
+
+Las sesiones **nuevas** de DSH usan el **UUID puro** como nombre de directorio
+(`sessions/<slug-cwd>/ed00cf7a-b7c1-.../session.v4.jsonl.zstd`), no
+`session-<uuid>`. Esas sesiones **quedaban fuera del índice de títulos**, así que
+el coordinador no tenía título real y caía al ID.
+
+Además, el plugin `dsh-tts-coordinator-bridge` nunca recibía los metadatos:
+`client-inject.js` depende de `window.__DSH_SESSIONS__`, que el cliente **no
+expone** → `sessionMeta` quedaba vacío → el bridge usaba su fallback
+`sessionId.slice(0, 8)` **como si fuera un título**.
+
+### Fixes (4 capas)
+
+1. **`read-titles.py`**: se acepta **cualquier** directorio que contenga un
+   `session*.jsonl.zstd` (ya no se exige el prefijo `session-`).
+2. **`dsh-titles.js` → `resolve()`**: normaliza el id (con/sin prefijo
+   `session-`, y comparación por UUID) → el cliente y el disco pueden usar
+   cualquiera de las dos formas.
+3. **`server/index.js`**: `pareceSessionId(t, sessionId)` descarta cualquier
+   título que **sea o parezca un identificador** (hex de 8, UUID, forma corta
+   `ed00cf7a-b7c1`, prefijo `session-`, o fragmento del sessionId real).
+   Si no hay título real se usa un nombre legible: **"Sesión de DSH1"**,
+   "Sesión de Dany", etc. — **nunca un ID**.
+4. **`dsh-bridge/lib/index.js`**: `getSessionTitle()` ya **no** devuelve el
+   sessionId como título; devuelve `''` y el coordinador lo resuelve.
+
+### Verificado
+
+```
+índice de títulos:  122  ->  178   (aparecieron las sesiones con UUID puro)
+ed00cf7a-b7c1-…     ->  "Perform read-only network/service reacha…"
+locución nueva (sessionTitle enviado = "ed00cf7a"):
+   sessionName : Perform read-only network/service reacha
+   log         : ▶ REPRODUCIENDO {"source":"dsh1","session":"Perform read-only network/service reacha"}
+cola: dsh1 → "Read-only diagnostic of the existing…" | dany → "Publia dev" | dsh2 → "# MISIÓN: CIUDADAN MEDIA PLAYER,"
+```
+
+## 16. Checklist antes de dar por terminado
 
 1. `node --check` de todos los `.js` modificados + `python -m py_compile` de los `.py`.
 2. Copiar al runtime: `%TEMP%\ciudadan-tts-coordinator\`.

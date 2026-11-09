@@ -42,7 +42,11 @@ for home in homes:
                 continue
             try:
                 for sd in os.scandir(proj.path):
-                    if not sd.is_dir() or not sd.name.startswith('session-'):
+                    # NO se exige el prefijo 'session-': las sesiones NUEVAS usan el
+                    # UUID puro como nombre de directorio (p.ej. ed00cf7a-b7c1-...).
+                    # Con el filtro antiguo esas sesiones quedaban fuera del índice
+                    # y el coordinador anunciaba el ID en vez del título real.
+                    if not sd.is_dir():
                         continue
                     for sf in os.scandir(sd.path):
                         if sf.is_file() and sf.name.startswith('session') and sf.name.endswith('.jsonl.zstd'):
