@@ -451,7 +451,38 @@ Crash real (servidor muerto con el video pausado) -> al reiniciar:
   chrome=SONANDO (4) | paused-media.json eliminado | todas las apps al 100%
 ```
 
-## 19. Checklist antes de dar por terminado
+## 19. El arranque NO puede tumbar el servicio (2026-11-09)
+
+**Síntoma**: Claude Code (free-claude-code-windows) ejecutó
+`scripts\start-coordinator.cmd` desde su propio turno y el servicio quedó
+inestable: lo lanzó **dos veces a la vez** (dos shells de Claude en paralelo) →
+dos procesos `node src\server\index.js` compitiendo por el puerto 3199.
+
+**Causa**: `start-coordinator.cmd` arrancaba el servidor **sin comprobar** si ya
+había uno vivo. El segundo proceso chocaba con `EADDRINUSE` (después de haber
+aplicado la migración de configuración multimedia) y el servicio quedaba en mal
+estado.
+
+**Arreglo aplicado** — `scripts/start-coordinator.cmd` es ahora **idempotente y
+seguro**:
+
+1. Si `/api/v1/health` responde 200 → **no hace nada** (no reinicia, no mata).
+2. Si el puerto 3199 está ocupado por otro proceso → **no se toca nada**.
+3. Solo arranca cuando el puerto está libre.
+
+Consecuencia: cualquier cliente (Claude Code, DSH, scripts de arranque) puede
+invocar el script sin riesgo de derribar el servicio.
+Verificado: 3 invocaciones consecutivas → mismo PID y `uptime` sin reinicio.
+
+**Relación con Claude**: `src/integrations/claude-code.js` es **solo cliente**
+del contrato HTTP (`POST /api/v1/speech`): no sintetiza, no reproduce, no
+reinicia y no mata procesos del coordinador. El hook está registrado en
+`C:\Users\elyiz\.claude\settings.json` (evento `Stop`), entrega en ~2,5 s
+(worker desacoplado en segundo plano, para no bloquear a Claude) y envía
+`source: 'claude-orch'`, que el registro de fuentes resuelve **por alias** a la
+fuente canónica `claude` (voz `es-AR-TomasNeural`, silenciable desde el panel).
+
+## 20. Checklist antes de dar por terminado
 
 1. `node --check` de todos los `.js` modificados + `python -m py_compile` de los `.py`.
 2. Copiar al runtime: `%TEMP%\ciudadan-tts-coordinator\`.
