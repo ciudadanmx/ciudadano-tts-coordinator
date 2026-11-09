@@ -68,6 +68,7 @@ export class UtteranceQueue extends EventEmitter {
     this.items = new Map() // requestId -> utterance
     this.order = [] // requestIds en orden de llegada
     this.playing = null // requestId actualmente reproduciéndose
+    this._lastServedSource = null // última fuente servida (fairness round-robin)
     this.lock = null // { requestId, acquiredAt, expiresAt }
     this.lockTimer = null
     this.processing = false
@@ -252,11 +253,34 @@ export class UtteranceQueue extends EventEmitter {
 
   // --- Obtener siguiente pendiente ---
   _next() {
+    // FAIRNESS entre fuentes (round-robin): sin esto, una fuente que genera
+    // locuciones sin parar (p.ej. dsh2) MONOPOLIZA la cola y las demás
+    // (dsh1, dany, claude) quedan enterradas: el usuario sólo oía una voz
+    // ("no se escuchan los demás agentes"). Si la última locución servida fue
+    // de la fuente X y hay items de OTRA fuente, se sirve la más antigua de
+    // esa otra fuente. Sólo si no hay alternativa se sigue con X.
+    const queued = []
     for (const id of this.order) {
       const u = this.items.get(id)
-      if (u && u.status === 'queued') return u
+      if (u && u.status === 'queued') queued.push(u)
     }
-    return null
+    if (!queued.length) return null
+    if (queued.length === 1) return queued[0]
+
+    const masAntigua = (lista) => lista.reduce((a, b) => {
+      const pa = PRIORITY_ORDER[a.priority] ?? 1
+      const pb = PRIORITY_ORDER[b.priority] ?? 1
+      if (pa !== pb) return pa < pb ? a : b
+      if (a.seq !== b.seq) return a.seq < b.seq ? a : b
+      return a.fragmentIndex <= b.fragmentIndex ? a : b
+    })
+
+    const ultima = this._lastServedSource
+    if (ultima) {
+      const alternativas = queued.filter(u => (u.source || '?') !== ultima)
+      if (alternativas.length) return masAntigua(alternativas)
+    }
+    return masAntigua(queued)
   }
 
   // --- Adquirir lock atómico para reproducción ---
@@ -410,6 +434,9 @@ export class UtteranceQueue extends EventEmitter {
 
       // 4. Reproducción con lock (volumen: mpv ya arranca con --volume=config.player.volume; no pisar por utterance)
       this.playing = utterance.requestId
+      // Fairness: se recuerda la fuente servida para que la siguiente elija
+      // otra fuente si hay alguna esperando (round-robin entre agentes).
+      this._lastServedSource = utterance.source || '?'
       utterance.status = 'playing'
       utterance.playStatus = 'playing'
       utterance.startedAt = Date.now()

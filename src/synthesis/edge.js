@@ -134,10 +134,12 @@ export class EdgeSynthesizer {
       const proc = spawn(cmd.file, cmd.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       const errChunks = []
       let settled = false
+      let watcher = null
       const finish = (fn, arg) => {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        if (watcher) { clearInterval(watcher); watcher = null }
         fn(arg)
       }
       const timer = setTimeout(() => {
@@ -173,6 +175,33 @@ export class EdgeSynthesizer {
         }
         finish(resolve)
       })
+
+      // El wrapper de edge-tts puede NO cerrar nunca aunque el audio ya esté
+      // escrito (el proceso queda colgado esperando). Esperar al 'close' hacía
+      // que cada locución tardara el timeout completo (30 s) y la cola se
+      // saturaba: las demás fuentes quedaban enterradas y no se oían.
+      // Se vigila el archivo de salida: cuando su tamaño se estabiliza, el
+      // MP3 está completo y se da por buena la síntesis.
+      const POLL_MS = 250
+      const ESTABLE_MS = 2000
+      let lastSize = -1
+      let estableDesde = 0
+      watcher = setInterval(() => {
+        let size = -1
+        try { size = statSync(outFile).size } catch { return }
+        if (size <= 1024) return
+        if (size !== lastSize) {
+          lastSize = size
+          estableDesde = Date.now()
+          return
+        }
+        if (Date.now() - estableDesde < ESTABLE_MS) return
+        // El audio está completo: se cierra el proceso (a veces no termina solo)
+        // y se resuelve con éxito.
+        this._killTree(proc)
+        logger.debug('edge-tts: audio completo por estabilidad del archivo', { voice, bytes: size })
+        finish(resolve)
+      }, POLL_MS)
     })
   }
 
