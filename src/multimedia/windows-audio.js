@@ -6,10 +6,14 @@ import { spawn } from 'node:child_process'
 import { writeFileSync, mkdtempSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { logger } from '../monitoring/logger.js'
 
-const PY_SCRIPT = new URL('./audio-session.py', import.meta.url).pathname
-  .replace(/^\/([A-Z]:)/, '$1')
+// fileURLToPath y NO .pathname: con el runtime en Kompa la ruta es UNC
+// (\\192.168.1.7\...) y .pathname la deja como /\\192.168.1.7/... que el
+// spawn de python no entiende -> el puente queda en modo stub y el ducking
+// deja de funcionar (la musica no baja).
+const PY_SCRIPT = fileURLToPath(new URL('./audio-session.py', import.meta.url))
 
 function findPython() {
   return process.env.CIUDADAN_PYTHON || 'python'

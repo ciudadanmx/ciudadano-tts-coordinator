@@ -1122,7 +1122,9 @@ async function main() {
     logger.info(`  Panel: http://${config.server.host}:${config.server.port}/`)
     logger.info(`  Health: http://${config.server.host}:${config.server.port}/api/v1/health`)
     console.log(`\n🎙️  CIUDADAN TTS COORDINATOR corriendo en http://${config.server.host}:${config.server.port}`)
-    console.log(`   Token: ${token.slice(0, 8)}… (archivo: ~/.ciudadan-tts-coordinator/token)\n`)
+    // NUNCA imprimir fragmentos del token (regla del ledger: el token no se
+    // escribe en logs). Solo la ruta del archivo.
+    console.log(`   Token en: ~/.ciudadan-tts-coordinator/token\n`)
   })
 }
 
