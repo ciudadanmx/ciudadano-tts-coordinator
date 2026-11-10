@@ -69,6 +69,11 @@ export class UtteranceQueue extends EventEmitter {
     this.order = [] // requestIds en orden de llegada
     this.playing = null // requestId actualmente reproduciéndose
     this._lastServedSource = null // última fuente servida (fairness round-robin)
+    // Pre-síntesis en paralelo: Edge TTS tarda 30-40 s por fragmento (a veces
+    // se cuelga), así que sintetizar de uno en uno deja la cola con una hora
+    // de retraso. Se lanzan varias síntesis a la vez y se consumen en orden.
+    this._preSynth = new Map() // requestId -> Promise<audioResult>
+    this._prefetching = false
     this.lock = null // { requestId, acquiredAt, expiresAt }
     this.lockTimer = null
     this.processing = false
@@ -110,8 +115,19 @@ export class UtteranceQueue extends EventEmitter {
       } catch { /* línea corrupta */ }
     }
     const pending = []
+    // Descartar lo que ya es demasiado viejo: si la voz lleva una hora de
+    // retraso, la locución dejó de servir de algo (y ocupaba la cola, que
+    // llegaba a llenarse y devolvía 429). El texto queda en el historial.
+    const maxAge = this.config.queue?.maxAgeMs ?? 10 * 60 * 1000
+    const limite = Date.now() - maxAge
+    let descartadas = 0
     for (const ev of last.values()) {
-      if (ev.state === 'queued' && ev.text && !this.items.has(ev.requestId)) pending.push(ev)
+      if (ev.state !== 'queued' || !ev.text || this.items.has(ev.requestId)) continue
+      if ((ev.createdAt || 0) < limite) { descartadas++; continue }
+      pending.push(ev)
+    }
+    if (descartadas) {
+      logger.info('Locuciones descartadas por antiguedad', { count: descartadas, maxAgeMs: maxAge })
     }
     pending.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
     if (!pending.length) return
@@ -173,6 +189,21 @@ export class UtteranceQueue extends EventEmitter {
     }
   }
 
+  // --- Dividir un texto largo en trozos por párrafo/frase (sin perder palabras) ---
+  _chunkText(text, maxChars) {
+    const out = []
+    let resto = String(text || '').trim()
+    while (resto.length > maxChars) {
+      let corte = resto.lastIndexOf(' ', maxChars)
+      if (corte < maxChars * 0.4) corte = resto.lastIndexOf('\n', maxChars)
+      if (corte < maxChars * 0.4) corte = maxChars
+      out.push(resto.slice(0, corte).trim())
+      resto = resto.slice(corte).trim()
+    }
+    if (resto) out.push(resto)
+    return out.filter(Boolean)
+  }
+
   // --- Encolar solicitud ---
   enqueue(request) {
     const id = request.requestId || randomUUID()
@@ -189,6 +220,36 @@ export class UtteranceQueue extends EventEmitter {
     const text = String(request.text || '')
     if (text.length > maxText) {
       return { ok: false, error: `text too long (${text.length} > ${maxText})`, requestId: id }
+    }
+
+    // TROCEO DE SEGURIDAD: algunos emisores (Dany) mandan el mensaje entero
+    // en un solo fragmento de miles de caracteres. Edge TTS tarda entonces
+    // varios minutos y la locución se pierde por timeout (por eso no se
+    // oía a Dany). Aquí se divide en trozos manejables conservando el
+    // interventionId, de modo que los fragmentos suenan seguidos y el
+    // "ciclo continuo" (ducking y pausa sin restore) se mantiene.
+    const maxChunk = this.config.queue?.maxChunkChars ?? 420
+    const partes = (request.totalFragments ?? 1) <= 1 && text.length > maxChunk
+      ? this._chunkText(text, maxChunk)
+      : [text]
+    if (partes.length > 1) {
+      const interventionId = request.interventionId || id
+      const encolados = []
+      for (let i = 0; i < partes.length; i++) {
+        const r = this.enqueue({
+          ...request,
+          requestId: `${id}#${i}`,
+          text: partes[i],
+          interventionId,
+          fragmentIndex: i,
+          totalFragments: partes.length,
+        })
+        encolados.push(r)
+      }
+      logger.info('Texto troceado para síntesis', {
+        requestId: id, source: request.source, chars: text.length, fragmentos: partes.length,
+      })
+      return { ok: true, requestId: id, chunked: true, fragments: partes.length, items: encolados }
     }
 
     const utterance = {
@@ -212,10 +273,14 @@ export class UtteranceQueue extends EventEmitter {
       playStatus: 'pending', // pending | playing | done | error | skipped
       error: null,
       attempts: 0,
-      // 2 intentos: con el timeout de síntesis (30 s) el peor caso es ~62 s.
-      // Con 3 intentos la cola se quedaba "sintetizando" más de 3 minutos y
-      // el resto de las locuciones no sonaba (atasco perceived como voz baja).
-      maxAttempts: 2,
+      // 3 intentos: el servicio Edge TTS se cuelga de forma intermitente y
+      // con textos largos puede tardar 40 s o más. Con 2 intentos y timeout de
+      // 30 s la locución se perdía. Los textos se trocean a 420 caracteres,
+      // así que 90 s por intento es holgado (peor caso ~4,5 min, y si aun así
+      // falla la locución vuelve a la cola: no se pierde).
+      maxAttempts: 3,
+      retryCount: 0, // reintentos globales (la locución vuelve a la cola)
+      notBefore: 0,   // no servir antes de este instante (backoff)
     }
     this.items.set(id, utterance)
     this._insertOrdered(id)
@@ -228,6 +293,7 @@ export class UtteranceQueue extends EventEmitter {
     })
     logger.info('Utterance enqueued', { requestId: id, source: utterance.source, sessionId: utterance.sessionId, status: utterance.status, priority: utterance.priority, fragments: `${utterance.fragmentIndex+1}/${utterance.totalFragments}` })
     this.emit('enqueued', utterance)
+    this._startPrefetch()
     this._pump()
     return { ok: true, requestId: id, status: utterance.status, queuePosition: this._positionOf(id) }
   }
@@ -260,9 +326,12 @@ export class UtteranceQueue extends EventEmitter {
     // de la fuente X y hay items de OTRA fuente, se sirve la más antigua de
     // esa otra fuente. Sólo si no hay alternativa se sigue con X.
     const queued = []
+    const ahora = Date.now()
     for (const id of this.order) {
       const u = this.items.get(id)
-      if (u && u.status === 'queued') queued.push(u)
+      // notBefore: la locución vuelve a la cola tras un fallo de síntesis y
+      // espera su turno de reintento (backoff). No se sirve antes de tiempo.
+      if (u && u.status === 'queued' && (!u.notBefore || u.notBefore <= ahora)) queued.push(u)
     }
     if (!queued.length) return null
     if (queued.length === 1) return queued[0]
@@ -367,21 +436,64 @@ export class UtteranceQueue extends EventEmitter {
     }
   }
 
+  // Texto completo a sintetizar (incluye el anuncio de sesión/tarea).
+  _fullText(utterance) {
+    let fullText = utterance.text
+    const annCfg = this.config.announcements
+    if (annCfg?.enabled && utterance.fragmentIndex === 0) {
+      const prefix = buildAnnouncement(
+        annCfg,
+        utterance.sessionName || utterance.sessionTitle,
+        utterance.taskTitle
+      )
+      if (prefix) fullText = prefix + '\n\n' + utterance.text
+    }
+    return fullText
+  }
+
+  // Lanza varias síntesis en paralelo para que la cola no se acumule:
+  // Edge TTS tarda 30-40 s por fragmento y, de uno en uno, una cola de 100
+  // locuciones tardaría más de una hora en vaciarse.
+  _startPrefetch() {
+    const conc = this.config.synthesis?.concurrency ?? 3
+    if (conc <= 1 || this._prefetching) return
+    this._prefetching = true
+    setImmediate(() => {
+      try {
+        const ahora = Date.now()
+        const slots = Math.max(0, conc - this._preSynth.size)
+        if (slots > 0) {
+          const candidatos = []
+          for (const id of this.order) {
+            const u = this.items.get(id)
+            if (!u || u.status !== 'queued') continue
+            if (u.notBefore && u.notBefore > ahora) continue
+            if (this._preSynth.has(id)) continue
+            candidatos.push(u)
+            if (candidatos.length >= slots) break
+          }
+          for (const u of candidatos) {
+            const fullText = this._fullText(u)
+            const entry = { done: false, result: null }
+            entry.promise = Promise.resolve()
+              .then(() => this.deps.synthesize(fullText, { voice: u.voice, requestId: u.requestId }))
+              .then(r => { entry.done = true; entry.result = r; return r })
+              .catch(e => { entry.done = true; entry.result = { error: e.message }; return entry.result })
+            this._preSynth.set(u.requestId, entry)
+          }
+        }
+      } catch { /* noop */ } finally {
+        this._prefetching = false
+      }
+    })
+  }
+
   async _process(utterance) {
     const { synthesize, player, multimedia } = this.deps
     try {
       // 1. Anuncio de sesión/tarea (si está habilitado y hay nombre).
       //    Prioridad de nombre: sessionName (real, desde disco) > sessionTitle > taskTitle.
-      let fullText = utterance.text
-      const annCfg = this.config.announcements
-      if (annCfg?.enabled && utterance.fragmentIndex === 0) {
-        const prefix = buildAnnouncement(
-          annCfg,
-          utterance.sessionName || utterance.sessionTitle,
-          utterance.taskTitle
-        )
-        if (prefix) fullText = prefix + '\n\n' + utterance.text
-      }
+      const fullText = this._fullText(utterance)
 
       // 2. Síntesis
       utterance.status = 'synthesizing'
@@ -391,6 +503,24 @@ export class UtteranceQueue extends EventEmitter {
 
       let audioResult
       let attempt = 0
+      // Si esta locución ya se estaba pre-sintetizando en paralelo, se usa
+      // ese audio (sintetizado segundos antes) en vez de esperar otro turno.
+      const pre = this._preSynth.get(utterance.requestId)
+      if (pre) {
+        this._preSynth.delete(utterance.requestId)
+        try {
+          audioResult = await pre.promise
+        } catch (e) {
+          audioResult = null
+        }
+        if (audioResult && audioResult.audio) {
+          attempt = 1
+          utterance.attempts = 1
+          logger.info('Usando audio pre-sintetizado', { requestId: utterance.requestId })
+        } else {
+          audioResult = null
+        }
+      }
       while (attempt < utterance.maxAttempts) {
         attempt++
         utterance.attempts = attempt
@@ -401,7 +531,10 @@ export class UtteranceQueue extends EventEmitter {
         } catch (e) {
           logger.warn(`Synthesis attempt ${attempt} failed`, { requestId: utterance.requestId, error: e.message })
           if (attempt >= utterance.maxAttempts) throw e
-          await new Promise(r => setTimeout(r, 1000 * attempt))
+          // Backoff: la causa real de los fallos es que el servicio Edge TTS
+          // se cuelga de forma intermitente; un reintento con espera suele
+          // funcionar (medido: ~50% de éxito al segundo intento).
+          await new Promise(r => setTimeout(r, 1500 * attempt))
         }
       }
 
@@ -545,6 +678,39 @@ export class UtteranceQueue extends EventEmitter {
         this._lastInterventionId = utterance.interventionId || null
       }
     } catch (e) {
+      // Si falló la SÍNTESIS (no la reproducción), la locución NO se pierde:
+      // vuelve a la cola para reintentarse más tarde. Antes un fallo de
+      // edge-tts (su Timeout) descartaba el mensaje para siempre y el usuario
+      // sencillamente no oía lo que el agente acababa de decir. Es lo que
+      // pasaba con Dany, cuyos mensajes llegan a 3.900 caracteres.
+      const falloSintesis = utterance.synthStatus === 'error'
+      const maxReintentos = this.config.queue?.maxRetries ?? 6
+      const reintento = utterance.retryCount || 0
+      if (falloSintesis && reintento < maxReintentos) {
+        utterance.retryCount = reintento + 1
+        utterance.status = 'queued'
+        utterance.synthStatus = 'queued'
+        utterance.error = e.message
+        utterance.attempts = 0
+        utterance.finishedAt = null
+        const espera = Math.min(45000, 5000 * utterance.retryCount)
+        utterance.notBefore = Date.now() + espera
+        this._queueEvent({ requestId: utterance.requestId, state: 'queued', createdAt: utterance.createdAt })
+        logger.warn('Síntesis fallida: la locución vuelve a la cola para reintento', {
+          requestId: utterance.requestId, source: utterance.source, sessionId: utterance.sessionId,
+          reintento: utterance.retryCount, esperaMs: espera, error: e.message,
+        })
+        this.playing = null
+        this._releaseLock()
+        if (multimedia) {
+          try { await multimedia.restoreVolumes() } catch { /* ignore */ }
+        }
+        // Programa el reintento cuando venza la espera.
+        const t = setTimeout(() => { try { this._pump() } catch { /* noop */ } }, espera + 250)
+        if (t.unref) t.unref()
+        this._pump()
+        return
+      }
       utterance.status = 'error'
       utterance.synthStatus = 'error'
       utterance.error = e.message
@@ -560,6 +726,7 @@ export class UtteranceQueue extends EventEmitter {
       }
     }
     // Continuar con la siguiente
+    this._startPrefetch()
     this._pump()
   }
 

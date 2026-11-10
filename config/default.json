@@ -15,7 +15,7 @@
     "restartWindowMs": 60000
   },
   "queue": {
-    "maxLength": 100,
+    "maxLength": 300,
     "maxTextLength": 50000,
     "priorityLevels": [
       "high",
@@ -23,13 +23,17 @@
       "low"
     ],
     "lockTimeoutMs": 120000,
-    "preSynthesizeAhead": 2
+    "preSynthesizeAhead": 2,
+    "maxRetries": 6,
+    "maxChunkChars": 420,
+    "maxAgeMs": 600000
   },
   "synthesis": {
     "provider": "edge",
     "edgeBin": "edge-tts",
     "edgePython": "C:\\Python313\\python.exe",
-    "timeoutMs": 30000,
+    "timeoutMs": 90000,
+    "concurrency": 3,
     "cacheEnabled": true,
     "cacheMaxMb": 200,
     "cacheDir": null

@@ -597,3 +597,82 @@ puerto de depuración remoto, así que la pausa **siempre** va por GSMTC. No es
 un fallo: GSMTC pausa y reanuda correctamente. No abrir un puerto de
 depuración en el Chrome del usuario solo para esto.
 
+## 22. Por qué se perdían las locuciones (y por qué no se oía a Dany)
+
+Cuatro fallos encadenados. Todos verificados con evidencia en vivo.
+
+### 22.1 Edge TTS se cuelga de forma intermitente
+
+Medido en esta red: 2 de 4 ejecuciones se quedan **con 0 bytes y sin stderr**
+(el proceso no muere, no escribe nada). Las que sí funcionan tardan **23-39 s**
+para ~320 caracteres. Es decir: **el servicio de síntesis es lento e
+intermitente**, no determinista.
+
+**Regla**: un timeout de 30 s descarta locuciones legítimas. El valor real debe
+ser holgado (`synthesis.timeoutMs = 90000`) y, sobre todo, **el fallo de
+síntesis no puede perder la locución**.
+
+### 22.2 Un fallo de síntesis no puede descartar el mensaje
+
+Antes, el `catch` de `_process()` marcaba la locución como `error` y la perdía
+para siempre. El usuario no oía lo que el agente acababa de decir, sin ninguna
+pista de por qué.
+
+**Regla**: si falla la SÍNTESIS (no la reproducción), la locución **vuelve a la
+cola** con `retryCount`, `notBefore` (backoff de 5 s × reintento, tope 45 s) y
+hasta `queue.maxRetries` intentos globales. `_next()` debe filtrar por
+`notBefore` para no servirla antes de tiempo.
+
+### 22.3 Los textos largos se trocean en el COORDINADOR, no en el emisor
+
+Dany envía el mensaje entero en **un solo fragmento** (hasta 3.949 caracteres
+medidos) y su ingress admite hasta 40.000. Con ese tamaño, Edge TTS tarda
+minutos → **la locución moría por timeout siempre**. Los puentes de DSH1/DSH2
+sí trocean (~500-700 caracteres), por eso ellos sí se oían.
+
+**Regla**: el coordinator trocea cualquier texto de un solo fragmento que supere
+`queue.maxChunkChars` (420) en trozos por palabra/párrafo, conservando el
+`interventionId` para que los fragmentos suenan seguidos (ciclo continuo: el
+ducking y la pausa **no** se restauran entre fragmentos del mismo TTS).
+
+### 22.4 La cola se llenaba y devolvía 429 (y nadie lo levantó)
+
+Con `maxLength: 100` y una síntesis de 30-40 s por fragmento, la cola llegaba a
+**100 activos = límite**: el coordinator respondía **HTTP 429** y el ingress de
+Dany lo traducía a `upstream-rejected`, así que la locución **nunca entraba**.
+Peor: el coordinator **no tenía tarea programada** — si se caía, nadie lo
+levantaba y **todos** los agentes quedaban mudos (09/11 a las 07:06: el ingress
+registró `fetch failed` y Dany dejó de mandar a las 07:59).
+
+**Reglas**:
+- `queue.maxLength` holgado (300) y `queue.maxAgeMs` (10 min) descarta lo que
+  ya no sirve: si la voz lleva una hora de retraso, la locución caducó.
+- La síntesis se hace **en paralelo** (`synthesis.concurrency = 3`): de uno en
+  uno, 100 locuciones tardaban más de una hora en vaciarse.
+- El coordinator tiene **watchdog propio** (tarea `Ciudadan-TTS-Coordinator`,
+  `scripts/coordinator-watchdog.ps1`): comprueba `/api/v1/health` cada 60 s y,
+  si no responde, levanta **exactamente una** instancia. Nunca toca
+  DSH1/DSH2/Dany ni los puertos 3080/3081/3091/8765/8770.
+
+### 22.5 Dany tiene su propio camino de entrada
+
+Dany **no** habla con el coordinator directamente:
+
+```
+DSH de Dany (VM) --SSH inverso--> 127.0.0.1:3200 (ingress-proxy.js)
+                                      |  exige token propio, fija source=dany
+                                      |  y voice=es-CL-LorenzoNeural
+                                      +--> 127.0.0.1:3199 (coordinator)
+```
+
+- El ingress vive en `C:\Users\elyiz\AppData\Local\Ciudadan\dany-tts-ingress\`.
+- Lo mantiene vivo `transport-supervisor.ps1` (tarea `Ciudadan-TTS-Dany-Transport`).
+- **Si el ingress cae, Dany deja de hablar por completo** y su lado remoto
+  renuncia: no hay reintento indefinido.
+- El ingress deduplica por `requestId` 48 h; un `rejected` (429) **sí** se
+  reintenta, un `accepted` no (responde 409).
+
+**Regla**: el estado del ingress (3200) y del túnel **forma parte de la salud
+del sistema de voz**. Si el coordinator no responde, el ingress es inútil
+aunque esté vivo.
+

@@ -137,7 +137,7 @@ function route(method, pattern, handler, opts = {}) {
   routes.push({ method, pattern, handler, auth: opts.auth !== false })
 }
 
-// Health (sin auth para monitoreo)
+// Health (sin auth para monitoreo: solo escucha en 127.0.0.1 y no expone datos)
 route('GET', '/api/v1/health', (req, res) => {
   sendJson(res, 200, {
     ok: true,
