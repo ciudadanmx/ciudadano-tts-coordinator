@@ -6,13 +6,13 @@ import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
+import { STATE_DIR } from '../paths.js'
 import { fileURLToPath } from 'node:url'
 import { mkdirSync } from 'node:fs'
 import { logger } from '../monitoring/logger.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PY = join(HERE, 'read-titles.py')
-const STATE_DIR = join(homedir(), '.ciudadan-tts-coordinator')
 const CACHE = join(STATE_DIR, 'dsh-titles-cache.json')
 // Python con ruta absoluta (el proceso puede arrancar sin PATH completo)
 const PYTHON = 'C:\\Python313\\python.exe'

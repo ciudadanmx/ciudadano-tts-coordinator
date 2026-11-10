@@ -3,7 +3,7 @@
 // por stdout — sin costo de arranque por llamada (evita carga CPU que corta el audio de mpv).
 
 import { spawn } from 'node:child_process'
-import { writeFileSync, mkdtempSync } from 'node:fs'
+import { writeFileSync, mkdtempSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { logger } from '../monitoring/logger.js'
@@ -130,6 +130,19 @@ export class WindowsAudioBridge {
     return this._call({ action: 'set', pid: Number(pid), volume: vol })
   }
 
+  // Purgar snapshots antiguos (dejan de ser utiles a los 10 minutos).
+  _purgeSnapshots() {
+    try {
+      const cutoff = Date.now() - 10 * 60 * 1000
+      for (const f of readdirSync(this.snapshotDir)) {
+        const p = join(this.snapshotDir, f)
+        try {
+          if (statSync(p).mtimeMs < cutoff) unlinkSync(p)
+        } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+  }
+
   async duckApp(processNames, percentage) {
     if (!this.available) return { stub: true, processNames, percentage }
     if (!processNames?.length || percentage <= 0) return { stub: false, ducked: [] }
@@ -140,6 +153,9 @@ export class WindowsAudioBridge {
     }
     const snapFile = join(this.snapshotDir, `snap-${Date.now()}.json`)
     try { writeFileSync(snapFile, JSON.stringify(result)) } catch {}
+    // Los snapshots son de diagnostico: se acumulan en %TEMP% y hay que
+    // purgarlos (117 carpetas 'ciudadan-audio-*' huerfanas en este equipo).
+    this._purgeSnapshots()
     logger.info('Ducking aplicado', {
       processNames, percentage,
       ducked: result.ducked?.map(d => `${d.ProcessName}(${d.ProcessId}): ${d.PreviousVolume}%→${d.NewVolume}%`),

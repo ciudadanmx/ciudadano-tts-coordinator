@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { stateDir } from '../paths.js'
 
 const CONFIG_DIR = join(homedir(), '.ciudadan-tts-coordinator')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -30,14 +31,17 @@ export function loadConfig() {
     defaults = JSON.parse(readFileSync(DEFAULT_FILE, 'utf8'))
   } catch { /* usar defaults hardcoded */ }
   // Aplicar rutas por defecto si no están definidas
-  const home = homedir()
   defaults.server = defaults.server || {}
   defaults.recovery = defaults.recovery || {}
   defaults.logging = defaults.logging || {}
   defaults.synthesis = defaults.synthesis || {}
-  if (!defaults.recovery.stateFile) defaults.recovery.stateFile = join(CONFIG_DIR, 'state.json')
-  if (!defaults.logging.file) defaults.logging.file = join(CONFIG_DIR, 'coordinator.log')
-  if (!defaults.synthesis.cacheDir) defaults.synthesis.cacheDir = join(CONFIG_DIR, 'audio-cache')
+  defaults.paths = defaults.paths || {}
+  // Todo lo que CRECE (cache, logs, cola, historial) vive en el stateDir,
+  // que puede estar en Kompa para no llenar el disco local.
+  const STATE = stateDir(defaults.paths.stateDir)
+  if (!defaults.recovery.stateFile) defaults.recovery.stateFile = join(STATE, 'state.json')
+  if (!defaults.logging.file) defaults.logging.file = join(STATE, 'coordinator.log')
+  if (!defaults.synthesis.cacheDir) defaults.synthesis.cacheDir = join(STATE, 'audio-cache')
 
   let userCfg = {}
   try {

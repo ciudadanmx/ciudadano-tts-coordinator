@@ -18,8 +18,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { logger } from '../monitoring/logger.js'
+import { STATE_DIR } from '../paths.js'
 
-const STATE_DIR = join(homedir(), '.ciudadan-tts-coordinator')
 const SOURCES_FILE = join(STATE_DIR, 'sources.json')
 const ASSIGNMENTS_FILE = join(STATE_DIR, 'voice-assignments.json')
 

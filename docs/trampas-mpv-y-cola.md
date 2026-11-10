@@ -676,3 +676,60 @@ DSH de Dany (VM) --SSH inverso--> 127.0.0.1:3200 (ingress-proxy.js)
 del sistema de voz**. Si el coordinator no responde, el ingress es inútil
 aunque esté vivo.
 
+## 23. El disco C: se llenó (10/11/2026)
+
+C: quedó al 100% (0.2 GB libres de 446 GB). Mapa de lo occupydo:
+
+| Qué | Tamaño | Dueño |
+|---|---|---|
+| `v-*.b64` (71 parches git de 121 MB) en `%TEMP%` | **8.04 GB** | flujo de "proteger trabajo en curso" del DSH |
+| `%TEMP%` completo | 11.4 GB | mixto |
+| `VirtualBox VMs\*.vdi` (2 discos) | 97 GB | infraestructura (no del TTS) |
+| `pagefile.sys` + `hiberfil.sys` | 41 GB | sistema |
+| `ciudadan-edge-*` (2951 carpetas) | 291 MB | **el sintetizador (nuestro)** |
+
+### 23.1 Regla: lo que crece vive en Kompa, el secreto se queda local
+
+`src/paths.js` separa dos cosas:
+
+- **CONFIG_DIR** (`~/.ciudadan-tts-coordinator`, local): `token` y `config.json`.
+  Son secretos: **no viajan a la red**.
+- **STATE_DIR**: todo lo que CRECE — cache de audio, logs, `queue.jsonl`,
+  `history.jsonl`, snapshots de volumen. Por defecto local; se mueve a Kompa
+  con `paths.stateDir` en la config o con `CIUDADAN_TTS_STATE_DIR`.
+
+```
+\\192.168.1.7\Kompa\_ciudadan-tts-coordinator\
+├── runtime\   <- copia del código que se ejecuta (NO en %TEMP%: Windows lo limpia)
+└── state\     <- cache de audio, logs, cola, historial
+```
+
+El runtime también se movió de `%TEMP%` a Kompa por una razón concreta:
+**Windows borra `%TEMP%` en los reinicios**, así que el coordinator se
+quedaba sin código para arrancar y el watchdog no podía levantarlo.
+
+**Regla**: `cmd.exe` no puede hacer `cd` a una ruta UNC ("no se permiten rutas
+UNC"), pero **node sí acepta UNC como argumento**: se pasa la ruta completa
+(`node "\\192.168.1.7\...\src\server\index.js"`) y nunca se hace `cd`.
+
+### 23.2 La carpeta temporal de la síntesis NO se borraba
+
+`edge.js` creaba `mkdtemp('ciudadan-edge-')` y solo la borraba en el `catch`:
+en el camino de éxito se acumulaban **2951 carpetas (291 MB)**.
+
+**Regla**: al terminar la síntesis, la carpeta temporal **siempre** se borra.
+Si el MP3 necesita sobrevivir (cache deshabilitado), se escribe en
+`audio-cache/tmp/` del stateDir, que el limpiador purga por antigüedad.
+
+### 23.3 El limpiador automático
+
+`scripts/limpieza-temporal.ps1` (tarea `Ciudadan-TTS-Limpieza`, cada 30 min):
+
+1. **Mueve** (no borra) a `\\192.168.1.7\Kompa\_residuos-temp` los `*.b64`,
+   `*.patch` y carpetas de prueba del TEMP con más de 6 h.
+2. **Elimina** las carpetas `ciudadan-edge-*` / `ciudadan-audio-*` con más de
+   30 min (ya son residuo).
+3. Informa del espacio libre.
+
+Nada se borra sin mover antes: todo queda recuperable en Kompa.
+

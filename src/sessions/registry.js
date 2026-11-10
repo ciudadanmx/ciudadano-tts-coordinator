@@ -5,8 +5,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { logger } from '../monitoring/logger.js'
+import { STATE_DIR } from '../paths.js'
 
-const STATE_DIR = join(homedir(), '.ciudadan-tts-coordinator')
 const VOICES_FILE = join(STATE_DIR, 'voice-assignments.json')
 
 const DEFAULT_PROFILES = {

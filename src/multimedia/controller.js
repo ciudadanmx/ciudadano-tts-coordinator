@@ -23,20 +23,21 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from '
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { logger } from '../monitoring/logger.js'
+import { STATE_DIR } from '../paths.js'
 import { WindowsAudioBridge } from './windows-audio.js'
 import { YouTubeController } from './youtube.js'
 
 const RESCAN_INTERVAL_MS = 4000
 const VOLUME_TOLERANCE = 0.03 // 3% — si el usuario cambió el volumen manualmente, no restaurar
 const EXCLUDED_PROCESSES = ['mpv', 'ciudadan-tts-coordinator'] // nunca tocar la voz del coordinador
-const SNAPSHOT_FILE = join(homedir(), '.ciudadan-tts-coordinator', 'duck-snapshot.json')
+const SNAPSHOT_FILE = join(STATE_DIR, 'duck-snapshot.json')
 // Volúmenes originales conocidos por pid (pid -> {original, ducked, appKey}).
 // Vive en disco para que un proceso NUEVO sepa cuál era el volumen real antes del
 // ducking: si no, tomaría el valor ya reducido como "original" (70% -> 49% -> ...)
 // y el volumen nunca volvería a 100.
-const ORIGINALS_FILE = join(homedir(), '.ciudadan-tts-coordinator', 'volume-originals.json')
+const ORIGINALS_FILE = join(STATE_DIR, 'volume-originals.json')
 // Contenido multimedia que pausamos y quedó pendiente de reanudar (sobrevive reinicios)
-const PAUSED_FILE = join(homedir(), '.ciudadan-tts-coordinator', 'paused-media.json')
+const PAUSED_FILE = join(STATE_DIR, 'paused-media.json')
 
 export class MultimediaController extends EventEmitter {
   constructor(config) {
@@ -309,7 +310,7 @@ export class MultimediaController extends EventEmitter {
         data.pending = Object.fromEntries([...this._pendingRestore.entries()].map(([pid, info]) =>
           [pid, { original: info.original, ducked: info.ducked, appKey: info.appKey }]))
       }
-      mkdirSync(join(homedir(), '.ciudadan-tts-coordinator'), { recursive: true })
+      mkdirSync(STATE_DIR, { recursive: true })
       writeFileSync(SNAPSHOT_FILE, JSON.stringify(data), { mode: 0o600 })
     } catch (e) { logger.warn('No se pudo persistir snapshot de ducking', { error: e.message }) }
   }
@@ -326,7 +327,7 @@ export class MultimediaController extends EventEmitter {
       // NO se borra el registro anterior: si el proceso muere, hay que poder
       // reanudarlo. El archivo se borra al reanudar de verdad (_clearPausedMedia).
       if (!titles.length) return
-      mkdirSync(join(homedir(), '.ciudadan-tts-coordinator'), { recursive: true })
+      mkdirSync(STATE_DIR, { recursive: true })
       writeFileSync(PAUSED_FILE, JSON.stringify({ savedAt: Date.now(), titles }), { mode: 0o600 })
     } catch (e) { logger.warn('No se pudo persistir el contenido pausado', { error: e.message }) }
   }
@@ -398,7 +399,7 @@ export class MultimediaController extends EventEmitter {
     try {
       const originals = {}
       for (const [pid, info] of this._pendingRestore) originals[pid] = info
-      mkdirSync(join(homedir(), '.ciudadan-tts-coordinator'), { recursive: true })
+      mkdirSync(STATE_DIR, { recursive: true })
       writeFileSync(ORIGINALS_FILE, JSON.stringify({ savedAt: Date.now(), originals }), { mode: 0o600 })
     } catch (e) {
       logger.warn('No se pudieron persistir los volúmenes originales', { error: e.message })

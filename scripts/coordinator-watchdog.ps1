@@ -22,7 +22,13 @@ $AppDir    = 'C:\Users\elyiz\AppData\Local\Ciudadan'
 $LogDir    = Join-Path $AppDir 'log'
 $LogFile   = Join-Path $LogDir 'ciudadan-tts-coordinator-watchdog.log'
 $LockFile  = Join-Path $AppDir 'ciudadan-tts-coordinator-watchdog.lock'
-$Runtime   = Join-Path $env:TEMP 'ciudadan-tts-coordinator'
+# El runtime vive en KOMPA (no en %TEMP%, que Windows limpia y que llenaba el
+# disco local). Si Kompa no esta disponible, se usa el runtime local.
+$KOMPA     = '\\192.168.1.7\Kompa\_ciudadan-tts-coordinator'
+$Runtime   = Join-Path $KOMPA 'runtime'
+if (-not (Test-Path (Join-Path $Runtime 'src\server\index.js'))) {
+  $Runtime = Join-Path $env:TEMP 'ciudadan-tts-coordinator'
+}
 $StartCmd  = Join-Path $Runtime 'scripts\start-coordinator.cmd'
 $HealthUrl = 'http://127.0.0.1:3199/api/v1/health'
 $Port      = 3199

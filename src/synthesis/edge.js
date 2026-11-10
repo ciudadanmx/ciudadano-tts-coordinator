@@ -46,6 +46,18 @@ export class EdgeSynthesizer {
   async _cleanCache() {
     if (!this.cacheEnabled) return
     try {
+      // Los MP3 temporales (cache deshabilitado) viven en cacheDir/tmp y se
+      // purgan por antiguedad: ya fueron reproducidos.
+      const tmpSub = join(this.cacheDir, 'tmp')
+      try {
+        const olds = await readdir(tmpSub)
+        const cutoff = Date.now() - 30 * 60 * 1000
+        for (const f of olds) {
+          const p = join(tmpSub, f)
+          const s = await stat(p).catch(() => null)
+          if (s && s.mtimeMs < cutoff) await unlink(p).catch(() => {})
+        }
+      } catch { /* no hay subdir tmp */ }
       const files = await readdir(this.cacheDir)
       let total = 0
       const entries = []
@@ -109,13 +121,22 @@ export class EdgeSynthesizer {
           await writeFile(cachePath, audio)
           this._cleanCache()
         } catch { /* cache write is best-effort */ }
+        // La carpeta temporal ya no sirve: el audio vive en el cache. Antes no
+        // se borraba en el camino de exito y se acumulaban miles de carpetas
+        // 'ciudadan-edge-*' en %TEMP% (291 MB y contando).
+        await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
         return { audio, path: cachePath, mime: 'audio/mpeg', cached: false }
       }
-      // Sin cache: copiar a archivo temporal persistente
+      // Sin cache: el MP3 debe sobrevivir hasta que el reproductor lo use, pero
+      // tampoco en %TEMP%: se deja en el stateDir (Kompa), dentro de audio-cache/tmp,
+      // que el limpiador del cache Eventually elimina por antiguedad.
       const { writeFile } = await import('node:fs/promises')
-      const persistPath = join(tmpDir, 'persist.mp3')
+      const persistDir = join(this.cacheDir, 'tmp')
+      await mkdir(persistDir, { recursive: true })
+      const persistPath = join(persistDir, `${randomUUID()}.mp3`)
       await writeFile(persistPath, audio)
-      return { audio, path: persistPath, mime: 'audio/mpeg', cached: false, _tmpDir: tmpDir }
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+      return { audio, path: persistPath, mime: 'audio/mpeg', cached: false, _tmpDir: persistDir }
     } catch (e) {
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
       throw e

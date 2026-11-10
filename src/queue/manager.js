@@ -14,6 +14,7 @@ import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { STATE_DIR } from '../paths.js'
 import { join } from 'node:path'
 import { logger } from '../monitoring/logger.js'
 
@@ -83,10 +84,10 @@ export class UtteranceQueue extends EventEmitter {
     this.history = [] // historial en memoria de locuciones procesadas
     this.playLog = [] // requestIds en orden de reproducción (para botón ⏮ anterior)
     // Historial PERSISTENTE en disco (texto nomás, sin audio) — sobrevive reinicios, TTL 48h
-    this.historyFile = join(homedir(), '.ciudadan-tts-coordinator', 'history.jsonl')
+    this.historyFile = join(STATE_DIR, 'history.jsonl')
     this._loadHistory()
     // Cola persistente: lo pendiente NO se pierde si el proceso se reinicia
-    this.queueFile = join(homedir(), '.ciudadan-tts-coordinator', 'queue.jsonl')
+    this.queueFile = join(STATE_DIR, 'queue.jsonl')
     this._loadQueue()
   }
 
@@ -101,7 +102,7 @@ export class UtteranceQueue extends EventEmitter {
   _loadQueue() {
     let raw
     try {
-      mkdirSync(join(homedir(), '.ciudadan-tts-coordinator'), { recursive: true })
+      mkdirSync(STATE_DIR, { recursive: true })
       raw = readFileSync(this.queueFile, 'utf8')
     } catch (e) {
       if (e.code !== 'ENOENT') logger.warn('No se pudo leer la cola persistente', { error: e.message })
@@ -156,7 +157,7 @@ export class UtteranceQueue extends EventEmitter {
 
   _loadHistory() {
     try {
-      mkdirSync(join(homedir(), '.ciudadan-tts-coordinator'), { recursive: true })
+      mkdirSync(STATE_DIR, { recursive: true })
       const raw = readFileSync(this.historyFile, 'utf8')
       const cutoff = Date.now() - HISTORY_TTL_MS
       const max = this.config.queue?.historySize ?? 200
