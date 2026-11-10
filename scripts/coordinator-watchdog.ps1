@@ -75,12 +75,6 @@ function Start-Coordinator {
     return
   }
   Write-Log 'el coordinator no responde: arrancando una instancia'
-  foreach ($pidToKill in (Get-CoordinatorPids)) {
-    try {
-      Stop-Process -Id $pidToKill -Force -ErrorAction Stop
-      Write-Log "  instancia colgada terminada pid=$pidToKill"
-    } catch { }
-  }
   Start-Sleep -Seconds 3
   try {
     Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', ('"' + $StartCmd + '"') -WindowStyle Hidden
@@ -88,6 +82,16 @@ function Start-Coordinator {
   } catch {
     Write-Log "  ERROR al arrancar: $($_.Exception.Message)"
   }
+}
+
+# Espera activa a que responda el health. Desde Kompa el arranque puede tardar
+# 30-60 s (lee el codigo por la red), asi que se espera con margen.
+function Wait-Healthy([int]$MaxSeconds, [int]$StepSeconds = 10) {
+  for ($i = 0; $i -lt [math]::Floor($MaxSeconds / $StepSeconds); $i++) {
+    Start-Sleep -Seconds $StepSeconds
+    if (Test-Healthy) { return $true }
+  }
+  return (Test-Healthy)
 }
 
 # --- Lock: una sola instancia del watchdog ---
@@ -108,13 +112,25 @@ try {
       # dar margen: puede estar arrancando
       Start-Sleep -Seconds 8
       if (-not (Test-Healthy)) {
-        Start-Coordinator
-        # comprobar tras el arranque y registrar el resultado
-        Start-Sleep -Seconds 25
-        if (Test-Healthy) {
-          Write-Log '  coordinator recuperado y sano'
+        # REGLA (10/11/2026): si hay una instancia VIVA, NO se mata. Con el
+        # runtime en Kompa el arranque dura 30-60 s y antes el watchdog mataba
+        # al proceso sano a los 25 s: bucle de reinicio endless (el daemon de
+        # pycaw caia y se rearrancaba cada 2 min, dejando el ducking sin efecto).
+        $vivos = @(Get-CoordinatorPids)
+        if ($vivos.Count -gt 0) {
+          Write-Log "  hay una instancia viva (pid=$($vivos -join ',')): se espera a que termine de arrancar, sin matarla"
+          if (Wait-Healthy 180) {
+            Write-Log '  coordinator sano (arranque lento, sin intervencion)'
+          } else {
+            Write-Log '  WARNING: la instancia viva no responde tras 3 min'
+          }
         } else {
-          Write-Log '  WARNING: el coordinator sigue sin responder tras el arranque'
+          Start-Coordinator
+          if (Wait-Healthy 150) {
+            Write-Log '  coordinator recuperado y sano'
+          } else {
+            Write-Log '  WARNING: el coordinator sigue sin responder tras el arranque'
+          }
         }
       }
     }

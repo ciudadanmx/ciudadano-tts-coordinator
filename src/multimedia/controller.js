@@ -127,10 +127,19 @@ export class MultimediaController extends EventEmitter {
    * "navegador" (mismo proceso de audio en Windows).
    * - "reduce 0%" equivale a "ignorar" (no baja nada).
    * - Si alguna de las dos estaba activa (pausar/reducir con % > 0), gana esa.
+   *
+   * REGLA (10/11/2026): si ya existe "navegador", SU valor manda. Antes la
+   * fusion pisaba la decision del usuario con la de las claves viejas en
+   * CADA arranque, y el navegador volvia a "pausar" solo. Las claves viejas
+   * solo se usan cuando el usuario nunca ha elegido nada.
    */
   _fusionarNavegador(apps) {
     const legacy = [apps.youtube, apps.chrome].filter(Boolean)
     if (!legacy.length) return null
+    if (apps.navegador && apps.navegador.mode) {
+      // Decision ya tomada: se respeta tal cual, solo se limpian las legacy.
+      return { navegador: { ...apps.navegador }, legacy: [] }
+    }
     const norm = p => {
       if (!p) return null
       if (p.mode === 'reduce' && !(p.percentage > 0)) return { ...p, mode: 'ignore', percentage: 0 }

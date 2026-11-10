@@ -112,18 +112,12 @@
   },
   "multimedia": {
     "applications": {
-      "youtube": {
+      "navegador": {
         "mode": "pause",
-        "percentage": 100,
+        "percentage": 0,
         "processNames": ["chrome"],
         "matchUrl": "youtube.com",
         "pauseSupported": true
-      },
-      "chrome": {
-        "mode": "reduce",
-        "percentage": 30,
-        "processNames": ["chrome"],
-        "pauseSupported": false
       },
       "spotify": {
         "mode": "ignore",
