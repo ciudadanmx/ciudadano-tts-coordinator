@@ -36,11 +36,15 @@ $dest = Join-Path $Residuo (Get-Date -Format 'yyyy-MM-dd')
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
 $corte = (Get-Date).AddHours(-6)
+$corteParche = (Get-Date).AddHours(-1)
 $patrones = @('v-*.b64', '*.patch', 'higiene.b64')
 $movidos = 0
 foreach ($pat in $patrones) {
+  # Los parches v-*.b64 (121 MB cada uno, uno cada ~20 min) se mueven a la
+  # hora: ya se aplicaron y son puro residuo. El resto espera 6 h.
+  $corteUso = if ($pat -eq 'v-*.b64') { $corteParche } else { $corte }
   foreach ($f in (Get-ChildItem $Temp -Filter $pat -File -ErrorAction SilentlyContinue)) {
-    if ($f.LastWriteTime -lt $corte) {
+    if ($f.LastWriteTime -lt $corteUso) {
       try {
         Move-Item -LiteralPath $f.FullName -Destination (Join-Path $dest $f.Name) -Force -ErrorAction Stop
         $movidos++
