@@ -167,6 +167,7 @@ powershell -File scripts/test-coordinator.ps1 -Token <token>  # 9 tests end-to-e
 |---|---|
 | [docs/historia-de-errores.md](docs/historia-de-errores.md) | **Errores reales que han pasado y cómo se arreglaron** (voz entrecortada, config que se revierte, ducking en stub, disco lleno, watchdog…). Consultar primero si algo vuelve a fallar. |
 | [docs/trampas-mpv-y-cola.md](docs/trampas-mpv-y-cola.md) | Trampas de mpv, de la cola y del runtime en Kompa (UNC). |
+| [docs/portapapeles.md](docs/portapapeles.md) | **Leer portapapeles** (Sprint 1): fuente `clipboard`, interruptor en el panel, atajo global Ctrl+Alt+R, privacidad. |
 | [docs/multimedia-windows.md](docs/multimedia-windows.md) | Ducking por app en Windows (pausar / reducir / ignorar). |
 | [docs/arquitectura.md](docs/arquitectura.md) | Cómo está montado el servicio. |
 | [docs/integracion-voz-claude-code.md](docs/integracion-voz-claude-code.md) | Hook de Claude Code. |

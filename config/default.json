@@ -80,28 +80,57 @@
       "name": "DSH1",
       "enabled": true,
       "voice": "es-MX-DaliaNeural",
-      "aliases": ["dsh1", "dsh-1", "agente1", "dsh"]
+      "aliases": [
+        "dsh1",
+        "dsh-1",
+        "agente1",
+        "dsh"
+      ]
     },
     {
       "id": "dsh2",
       "name": "DSH2",
       "enabled": true,
       "voice": "es-CO-SalomeNeural",
-      "aliases": ["dsh2", "dsh-2", "agente2"]
+      "aliases": [
+        "dsh2",
+        "dsh-2",
+        "agente2"
+      ]
     },
     {
       "id": "dany",
       "name": "DSH Dany",
       "enabled": true,
       "voice": "es-CL-LorenzoNeural",
-      "aliases": ["dany", "dsh-dany", "danny"]
+      "aliases": [
+        "dany",
+        "dsh-dany",
+        "danny"
+      ]
     },
     {
       "id": "claude",
       "name": "Claude",
       "enabled": true,
       "voice": "es-AR-TomasNeural",
-      "aliases": ["claude", "claude-code", "claude-orch", "claudeorch"]
+      "aliases": [
+        "claude",
+        "claude-code",
+        "claude-orch",
+        "claudeorch"
+      ]
+    },
+    {
+      "id": "clipboard",
+      "name": "Portapapeles",
+      "enabled": false,
+      "voice": "es-MX-DaliaNeural",
+      "aliases": [
+        "clipboard",
+        "portapapeles",
+        "clip"
+      ]
     }
   ],
   "announcements": {
@@ -115,20 +144,26 @@
       "navegador": {
         "mode": "pause",
         "percentage": 0,
-        "processNames": ["chrome"],
+        "processNames": [
+          "chrome"
+        ],
         "matchUrl": "youtube.com",
         "pauseSupported": true
       },
       "spotify": {
         "mode": "ignore",
         "percentage": 0,
-        "processNames": ["spotify"],
+        "processNames": [
+          "spotify"
+        ],
         "pauseSupported": false
       },
       "vlc": {
         "mode": "ignore",
         "percentage": 0,
-        "processNames": ["vlc"],
+        "processNames": [
+          "vlc"
+        ],
         "pauseSupported": false
       }
     },
@@ -163,5 +198,9 @@
     "file": null,
     "maxSizeMb": 10,
     "redactText": true
+  },
+  "clipboard": {
+    "maxChars": 2000,
+    "hotkey": "Ctrl+Alt+R"
   }
 }

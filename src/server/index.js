@@ -14,6 +14,7 @@ import { SessionRegistry, cleanTitle } from '../sessions/registry.js'
 import { SourceRegistry } from '../sources/registry.js'
 import { DshTitleResolver } from '../sessions/dsh-titles.js'
 import { MultimediaController } from '../multimedia/controller.js'
+import { ClipboardService } from '../clipboard/service.js'
 
 // --- Inicialización ---
 const config = loadConfig()
@@ -98,6 +99,13 @@ const queue = new UtteranceQueue(config, {
   player,
   multimedia,
 })
+
+// Servicio de lectura del portapapeles. Esta parte NO usa Win32: el monitor
+// nativo (AddClipboardFormatListener + WM_CLIPBOARDUPDATE + Ctrl+Alt+R) vive
+// en scripts/clipboard-watcher.ps1, como proceso separado en la sesión
+// interactiva, y se comunica por HTTP. El núcleo del coordinator sigue siendo
+// independiente de Windows.
+const clipboard = new ClipboardService(config, sources, queue)
 
 // Eventos de la cola → log
 queue.on('playing', (u) => logger.info('▶ REPRODUCIENDO', { source: u.source, session: u.sessionTitle || u.sessionId, voice: u.voice }))
@@ -189,6 +197,42 @@ route('POST', '/api/v1/speech', async (req, res) => {
     logger.info('Locución descartada: fuente desactivada', { source: body.source, id: src.id })
     return sendJson(res, 202, { ok: true, skipped: true, reason: 'source-disabled', source: src.id })
   }
+  // --- PORTAPAPELES (Sprint 1) -------------------------------------------
+  // Copiar un texto nuevo REEMPLAZA únicamente la lectura anterior del
+  // portapapeles: no se tocan las locuciones de otros agentes ni las alertas.
+  // El texto se marca efímero para no guardarlo en el historial persistente.
+  if (!esPreview && src?.id === 'clipboard') {
+    const sub = clipboard.submitText(body.text)
+    if (!sub.ok) {
+      logger.info('Texto del portapapeles descartado', { reason: sub.error })
+      return sendJson(res, 202, { ok: true, skipped: true, reason: sub.error })
+    }
+    const replaced = queue.cancelSession('clipboard')
+    const request = {
+      requestId: body.requestId || randomUUID(),
+      source: 'clipboard',
+      sourceId: 'clipboard',
+      sessionId: 'clipboard',
+      sessionName: '',
+      sessionTitle: '',
+      taskTitle: '',
+      voice: src.voice || body.voice || config.voices?.default || 'es-MX-DaliaNeural',
+      text: sub.text,
+      priority: body.priority || 'normal',
+      interventionId: body.interventionId,
+      fragmentIndex: body.fragmentIndex ?? 0,
+      totalFragments: body.totalFragments ?? 1,
+      preview: false,
+      ephemeral: true, // no se guarda en el historial (privacidad)
+    }
+    sources.markSeen('clipboard')
+    const result = queue.enqueue(request)
+    if (!result.ok) return sendJson(res, 429, { ok: false, error: result.error, requestId: result.requestId })
+    logger.info('Lectura del portapapeles encolada', {
+      requestId: result.requestId, chars: sub.chars, reemplazadas: replaced.cancelled,
+    })
+    return sendJson(res, 202, { ok: true, ...result, replaced: replaced.cancelled })
+  }
   // Registrar sesión PRIMERO para que getVoice conozca el source y asigne la voz correcta
   if (body.sessionId) {
     sessions.registerSession(body.sessionId, {
@@ -230,6 +274,29 @@ route('POST', '/api/v1/speech', async (req, res) => {
   const result = queue.enqueue(request)
   if (!result.ok) return sendJson(res, 429, { ok: false, error: result.error, requestId: result.requestId })
   sendJson(res, 202, { ok: true, ...result })
+})
+
+// ===================== PORTAPAPELES (Sprint 1) =====================
+// Estado del modulo: activado/desactivado, atajo global y salud del watcher.
+route('GET', '/api/v1/clipboard/status', (req, res) => {
+  sendJson(res, 200, clipboard.getStatus())
+})
+// Activar/desactivar la captura (interruptor del panel).
+route('POST', '/api/v1/clipboard/enabled', async (req, res) => {
+  const body = await parseJsonBody(req)
+  const r = clipboard.setEnabled(body.enabled === true || body.enabled === 'true')
+  sendJson(res, r.ok ? 200 : 400, r)
+})
+// Alternar. Lo usa el atajo global Ctrl+Alt+R del watcher de Windows.
+route('POST', '/api/v1/clipboard/toggle', async (req, res) => {
+  const r = clipboard.toggle()
+  sendJson(res, r.ok ? 200 : 400, r)
+})
+// El watcher de Windows reporta su estado (si el atajo pudo registrarse).
+route('POST', '/api/v1/clipboard/watcher-status', async (req, res) => {
+  const body = await parseJsonBody(req)
+  const r = clipboard.setWatcherStatus(body)
+  sendJson(res, 200, r)
 })
 
 // Cola
@@ -589,6 +656,24 @@ route('GET', '/', (req, res) => {
   <table id="sources"><tr><th>Activa</th><th>Fuente</th><th>Estado</th><th>Voz</th><th></th></tr></table>
 </div>
 <div class="card">
+  <h3>📋 Portapapeles de Windows</h3>
+  <p style="font-size:11px;color:#888;margin:0 0 6px">
+    Lee en voz alta lo que copias. Usa el evento nativo de Windows (sin sondeo).
+    Copiar un texto nuevo reemplaza solo la lectura anterior del portapapeles.
+  </p>
+  <label style="font-size:13px">
+    <input type="checkbox" id="clipOn" onchange="toggleClipboard(this.checked)">
+    <b>Leer portapapeles</b>
+  </label>
+  <span id="clipState" style="font-size:12px;margin-left:8px;color:#888">…</span>
+  <div id="clipHotkey" style="font-size:11px;color:#888;margin-top:4px"></div>
+  <div id="clipWarn" style="font-size:11px;color:#ffb300;margin-top:6px;display:none">
+    ⚠️ El portapapeles puede contener contraseñas, tokens o datos privados. Lo que copies se
+    enviará al sintetizador TTS local y <b>no</b> se guardará en el historial. Puedes desactivar
+    esta función en cualquier momento con <b>Ctrl+Alt+R</b>.
+  </div>
+</div>
+<div class="card">
   <h3>Cola: <span id="queueLen">0</span> solicitudes</h3>
   <div id="queue"></div>
 </div>
@@ -690,6 +775,7 @@ async function refresh() {
         return '<tr><td>'+hora+'</td><td>'+esc(i.source)+'</td><td>'+esc(i.sessionName || i.sessionTitle || i.sessionId||'')+'</td><td>'+esc(i.voice)+'</td><td>'+estado+'</td><td>'+dur+'</td><td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(i.textPreview||'')+'">'+esc(i.textPreview||'')+'</td><td style="white-space:nowrap"><button data-hidx="'+idx+'" data-mode="now" onclick="replayHist(this.dataset.hidx, this.dataset.mode)" title="Reproducir AHORA (pausa la cola y la reanuda)">▶</button> <button data-hidx="'+idx+'" data-mode="queue" onclick="replayHist(this.dataset.hidx, this.dataset.mode)" title="Agregar de nuevo al final de la cola">➕</button></td></tr>';
       }).join('');
   } catch (e) { console.warn('history falló', e); }
+  try { await refreshClipboard(); } catch (e) { console.warn('clipboard falló', e); }
   await refreshMultimedia();
 }
 async function replayHist(i, mode) {
@@ -863,6 +949,64 @@ async function saveVol() {
   document.getElementById('ttsVolNow').textContent = v;
   flash('💾 Volumen TTS guardado: ' + v + '%');
 }
+// ===================== PORTAPAPELES (Sprint 1) =====================
+var __clipState = null;
+async function refreshClipboard() {
+  try {
+    const st = await api('/api/v1/clipboard/status');
+    if (!st || st.ok === false) return;
+    __clipState = st;
+    const on = !!st.enabled;
+    const cb = document.getElementById('clipOn');
+    if (cb && cb.checked !== on) cb.checked = on;
+    const s = document.getElementById('clipState');
+    if (s) {
+      s.textContent = on ? '🟢 ACTIVADO — se leerá lo que copies' : '⚪ desactivado';
+      s.style.color = on ? '#4caf50' : '#888';
+    }
+    const w = st.watcher || {};
+    const h = document.getElementById('clipHotkey');
+    if (h) {
+      if (w.hotkeyError) {
+        h.innerHTML = '⌨️ Atajo <b>' + esc(st.hotkey || 'Ctrl+Alt+R') + '</b>: <span style="color:#ff5252">no disponible — ' + esc(w.hotkeyError) + '</span>';
+      } else if (w.running) {
+        h.innerHTML = '⌨️ Atajo global: <b>' + esc(st.hotkey || 'Ctrl+Alt+R') + '</b>' +
+          (w.hotkeyRegistered ? ' (funciona aunque el navegador no tenga el foco)' : ' (⚠️ no quedó registrado)') +
+          ' · monitor: activo';
+      } else {
+        h.innerHTML = '⌨️ Atajo global: <b>' + esc(st.hotkey || 'Ctrl+Alt+R') + '</b> · monitor: <span style="color:#ffb300">no está corriendo</span>';
+      }
+    }
+    const warn = document.getElementById('clipWarn');
+    if (warn) warn.style.display = on ? 'block' : 'none';
+  } catch (e) { /* el modulo puede no estar desplegado todavia */ }
+}
+async function toggleClipboard(want) {
+  if (want) {
+    // Aviso discreto de privacidad antes de activar la captura.
+    if (!confirm('Se leído en voz alta TODO lo que copies, incluso contraseñas o tokens.\n' +
+                 'El texto no se guarda en el historial y solo va al sintetizador TTS local.\n\n' +
+                 '¿Activar "Leer portapapeles"?')) {
+      const cb = document.getElementById('clipOn');
+      if (cb) cb.checked = false;
+      return;
+    }
+  }
+  try {
+    const r = await api('/api/v1/clipboard/enabled', {
+      method: 'POST', body: JSON.stringify({ enabled: !!want })
+    });
+    if (!r || r.ok === false) {
+      flash('❌ ' + ((r && r.error) || 'no se pudo cambiar el portapapeles'));
+      const cb = document.getElementById('clipOn');
+      if (cb) cb.checked = !want;
+      return;
+    }
+    flash(want ? '📋 Lectura del portapapeles activada (Ctrl+Alt+R para desactivarla)' : '📋 Lectura del portapapeles desactivada');
+    await refreshClipboard();
+  } catch (e) { flash('❌ ' + e.message) }
+}
+
 // ===================== FUENTES DE VOZ =====================
 // Las filas se GENERAN desde /api/v1/sources (registro extensible): agregar una
 // fuente nueva en config no requiere tocar el HTML.
@@ -899,6 +1043,17 @@ async function refreshSources() {
 async function toggleSource(el, enabled) {
   const id = (el && el.dataset ? el.dataset.src : el) || '';
   const want = (typeof enabled === 'boolean') ? enabled : !!(el && el.checked);
+  // La fuente "Portapapeles" tiene aviso de privacidad: activar la captura es
+  // una decisión consciente, asi que se pide confirmacion (tambien con el
+  // interruptor "Leer portapapeles").
+  if (id === 'clipboard' && want) {
+    if (!confirm('Se leído en voz alta TODO lo que copies, incluso contraseñas o tokens.\n' +
+                 'El texto no se guarda en el historial y solo va al sintetizador TTS local.\n\n' +
+                 '¿Activar "Leer portapapeles"?')) {
+      if (el && el.checked !== undefined) el.checked = false;
+      return;
+    }
+  }
   const r = await api('/api/v1/sources/' + encodeURIComponent(id), {
     method: 'PUT', body: JSON.stringify({ enabled: want })
   });
@@ -916,6 +1071,7 @@ async function toggleSource(el, enabled) {
   }
   __sourcesSig = '';
   refreshSources();
+  if (id === 'clipboard') refreshClipboard();
 }
 
 // ===================== SELECTOR DE VOCES =====================

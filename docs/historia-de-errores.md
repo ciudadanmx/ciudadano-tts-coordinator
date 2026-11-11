@@ -441,3 +441,38 @@ todos los intentos falla, se avisa y se sigue.
 > coincide con el propio texto del comando de diagnóstico y cuenta falsos
 > coordinators. Contar por `Name -eq 'node.exe'` **y** comprobar el listener
 > del 3199.
+
+
+---
+
+## 22. El monitor del portapapeles no detectaba copias (tres trampas de Win32)
+
+**Síntoma.** El watcher arrancaba, registraba el atajo Ctrl+Alt+R, pero copiar
+texto no producía ninguna lectura.
+
+**Causas raíz (tres, todas medidas).**
+
+1. **La ventana "message-only" (HWND_MESSAGE) no recibió WM_CLIPBOARDUPDATE.**
+   El autotest (PostMessage propio) tampoco llegó: el bucle de mensajes no
+   entregaba el mensaje a esa ventana. Cambiar a una ventana **top-level
+   oculta** (`WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`, sin WS_VISIBLE) lo arregló:
+   de repente llegaron los `WM_CLIPBOARDUPDATE` reales.
+2. **El hilo de C# llamaba scriptblocks de PowerShell** (los callbacks
+   `onText`/`onHotkey`): en PowerShell 5.1 no es seguro invocar un scriptblock
+   desde otro hilo y fallaba en silencio. Ahora el C# encola eventos en una
+   `ConcurrentQueue<string>` y el hilo principal de PowerShell los procesa.
+3. **`GetClipboardData` sin `OpenClipboard` devolvía NULL.** Hay que abrir el
+   portapapeles para leerlo (solo lectura: jamás se modifica ni se limpia) y
+   cerrarlo enseguida. Si otro proceso lo tiene abierto, `OpenClipboard` falla
+   con ERROR_ACCESS_DENIED y el evento se descarta sin consumir la secuencia.
+
+Además: `Add-Type` compila con **C# 5** (nada de `out var` inline ni
+`const IntPtr`), y `powershell.exe -File` rechaza rutas UNC (el script se
+copia a `%TEMP%` con hash, como el daemon SAPI).
+
+**Arreglo y verificación.** Ver `docs/portapapeles.md`. Verificado en vivo:
+copia real -> `▶ REPRODUCIENDO {source:"clipboard"}` -> `Locución efímera
+servida (no se guarda en el historial)`; el atajo simulado con `keybd_event`
+alternó `enabled` (True -> False); imagen ignorada; texto de 4200 caracteres
+recortado a 2000; con la captura apagada no se lee; DSH1/DSH2 siguieron
+sonando durante toda la prueba.

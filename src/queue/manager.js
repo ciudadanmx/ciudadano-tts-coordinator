@@ -282,6 +282,9 @@ export class UtteranceQueue extends EventEmitter {
       maxAttempts: 3,
       retryCount: 0, // reintentos globales (la locución vuelve a la cola)
       notBefore: 0,   // no servir antes de este instante (backoff)
+      // efímera: NO se guarda en el historial (ni en memoria ni en disco).
+      // Se usa para el portapapeles, cuyo texto puede contener datos privados.
+      ephemeral: request.ephemeral === true,
     }
     this.items.set(id, utterance)
     this._insertOrdered(id)
@@ -733,6 +736,15 @@ export class UtteranceQueue extends EventEmitter {
 
   // --- Historial de locuciones (en memoria, últimas N) ---
   _pushHistory(u) {
+    // Locución efímera (portapapeles): el texto puede contener contraseñas o
+    // datos privados, así que NO se guarda ni en memoria ni en el historial
+    // persistente. Solo se deja constancia de que ocurrió, sin su contenido.
+    if (u.ephemeral) {
+      logger.info('Locución efímera servida (no se guarda en el historial)', {
+        requestId: u.requestId, source: u.source, chars: (u.text || '').length,
+      })
+      return
+    }
     if (!this.history) this.history = []
     const entry = {
       requestId: u.requestId,

@@ -45,6 +45,13 @@ export const DEFAULT_SOURCES = [
     id: 'claude', name: 'Claude', enabled: true, voice: 'es-AR-TomasNeural',
     aliases: ['claude', 'claude-code', 'claude-orch', 'claudeorch'],
   },
+  {
+    // Portapapeles de Windows (Sprint 1). NACE DESACTIVADA: la captura no se
+    // activa sola al reiniciar. El interruptor "Leer portapapeles" del panel y
+    // el atajo global Ctrl+Alt+R la activan de forma explicita.
+    id: 'clipboard', name: 'Portapapeles', enabled: false, voice: 'es-MX-DaliaNeural',
+    aliases: ['clipboard', 'portapapeles', 'clip'],
+  },
 ]
 
 const norm = (s) => String(s || '').trim().toLowerCase()
@@ -109,8 +116,16 @@ export class SourceRegistry {
   ensureDefaults() {
     const configured = this.config.sources?.sources || this.config.sources || []
     const defaults = Array.isArray(configured) && configured.length ? configured : DEFAULT_SOURCES
+    // Las fuentes integradas (p.ej. 'clipboard') se agregan SIEMPRE, aunque la
+    // configuración del usuario no las liste. Si el usuario ya la desactivo,
+    // su estado guardado (enabled:false) se respeta: aqui solo se anaden las
+    // que NO existen todavia en el mapa.
+    const list = [...defaults]
+    for (const d of DEFAULT_SOURCES) {
+      if (!list.some(x => x.id === d.id)) list.push(d)
+    }
     let changed = false
-    for (const d of defaults) {
+    for (const d of list) {
       if (!d?.id) continue
       const existing = this.sources.get(d.id)
       if (existing) {
