@@ -569,6 +569,42 @@ export class MultimediaController extends EventEmitter {
     }
   }
 
+  /**
+   * "Subir al 100" de una app: pone el volumen de sus sesiones al 100 y
+   * deja ese 100 como nuevo ORIGINAL, para que la siguiente atenuación
+   * parta del 100 (y no de un valor ya bajo que se seguiría encadenando).
+   *
+   * El 11/11/2026 el volumen de Chrome había llegado a 1%: el ducking se
+   * aplicaba sobre el volumen YA atenuado y cada locución lo bajaba otra vez
+   * (22 -> 13 -> 8 -> 5 -> 3 -> 1). Con este método el usuario recupera el
+   * control al instante, sin tocar el volumen maestro ni el de mpv.
+   */
+  async resetAppVolume(appKey) {
+    const pol = this.getAppPolicies()[appKey]
+    if (!pol) return { ok: false, error: 'app desconocida: ' + appKey }
+    if (!this._audioBridge?.available) return { ok: false, error: 'puente de audio no disponible' }
+    const list = await this._audioBridge.listSessions()
+    const targets = (list.sessions || []).filter(s =>
+      pol.processNames?.some(n => s.ProcessName?.toLowerCase().includes(n.toLowerCase())))
+    const restored = []
+    for (const s of targets) {
+      const r = await this._audioBridge.setVolumeByPid(s.ProcessId, 100)
+      if (r && !r.error) {
+        restored.push({ ProcessId: s.ProcessId, ProcessName: s.ProcessName, Volume: 100 })
+        // El 100 pasa a ser el volumen original conocido: asi la proxima
+        // atenuacion calcula 100*(1-pct) y no se encadena sobre un valor bajo.
+        this._originalByPid.set(s.ProcessId, 100)
+        this._lastDuckedByPid.delete(s.ProcessId)
+        this._pendingRestore.delete(s.ProcessId)
+      }
+    }
+    this._saveOriginals()
+    logger.info(`[${appKey}] volumen restaurado al 100 por el usuario`, {
+      sesiones: restored.map(r => `${r.ProcessName}(${r.ProcessId})`),
+    })
+    return { ok: true, appKey, restored }
+  }
+
   _startRescan() {
     this._stopRescan()
     this._rescanTimer = setInterval(async () => {

@@ -432,6 +432,21 @@ route('POST', '/api/v1/multimedia/restore', async (req, res) => {
   await multimedia.restoreVolumes()
   sendJson(res, 200, { ok: true })
 })
+// "Subir al 100" de una app concreta. Deja el 100 como volumen original, para
+// que la siguiente atenuación parta del 100 y no se encadene sobre un valor
+// que ya estaba bajo (el caso de Chrome, que llegó a estar en 1%).
+route('POST', '/api/v1/multimedia/volume-reset', async (req, res) => {
+  const body = await parseJsonBody(req)
+  const raw = String(body.appKey || body.app || '')
+  const appKey = (raw === 'youtube' || raw === 'chrome') ? 'navegador' : raw
+  if (!appKey) return sendJson(res, 400, { ok: false, error: 'falta appKey' })
+  try {
+    const r = await multimedia.resetAppVolume(appKey)
+    sendJson(res, r.ok ? 200 : 400, r)
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e.message })
+  }
+})
 
 // Voces disponibles
 route('GET', '/api/v1/voices', async (req, res) => {
@@ -763,6 +778,8 @@ async function openCfg(focusApp) {
           '<option value="reduce"' + (a.mode==='reduce'?' selected':'') + '>Reducir</option>' +
           '<option value="ignore"' + (a.mode==='ignore'?' selected':'') + '>Ignorar</option></select></label>' +
         '<label>% reducción: <input type="range" id="cfgpct-' + esc(a.appKey) + '" data-pct="cfgpctv-' + esc(a.appKey) + '" min="0" max="100" value="' + a.percentage + '" style="width:120px" oninput="document.getElementById(this.dataset.pct).textContent=this.value"> <span id="cfgpctv-' + esc(a.appKey) + '">' + a.percentage + '</span>%</label>' +
+        '<br><button type="button" class="cfg-vol100" onclick="vol100(\'' + esc(a.appKey) + '\')">🔊 Subir al 100 ahora</button>' +
+        '<span style="color:#888;font-size:11px"> (deja el 100 como volumen original)</span>' +
         '</div>');
     }
     document.getElementById('cfgBody').innerHTML = rows.join('');
@@ -775,6 +792,20 @@ async function openCfg(focusApp) {
   } catch (e) { console.warn('openCfg falló', e); }
 }
 function closeCfg() { __cfgOpen = false; document.getElementById('cfgOverlay').style.display = 'none'; }
+// "Subir al 100": pone al 100 el volumen de esa app y deja ese 100 como
+// original, para que la próxima atenuación no se encadene sobre un valor bajo.
+async function vol100(appKey) {
+  try {
+    const r = await api('/api/v1/multimedia/volume-reset', { method: 'POST', body: JSON.stringify({ appKey: appKey }) });
+    if (r && r.ok) {
+      const n = (r.restored || []).length;
+      flash('🔊 ' + (appKey === 'navegador' ? 'Navegador' : appKey) + ': volumen al 100' + (n ? ' (' + n + ' sesión/es)' : ' (sin sesiones activas)'));
+      await refresh();
+    } else {
+      flash('❌ ' + (r?.error || 'no se pudo restaurar'));
+    }
+  } catch (e) { flash('❌ ' + e.message) }
+}
 async function forceRestore() { await api('/api/v1/multimedia/restore', { method: 'POST' }); refresh(); }
 async function ctrl(action) { await api('/api/v1/playback/' + action, { method: 'POST' }); refresh(); }
 async function togglePause() {

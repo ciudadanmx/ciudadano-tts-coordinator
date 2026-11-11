@@ -334,3 +334,110 @@ comandos largos en varios y escribir los scripts a archivo en vez de inline.
 - **Medir antes de culpar**: los cuatro fallos más caros de esta lista
   (entrecortado, config que se revierte, ducking en stub, disco lleno) se
   diagnosticaron con una medición, no con una suposición.
+
+
+---
+
+# Segunda tanda (11/11/2026): el audio se cortaba y el volumen quedaba bajo
+
+## 19. La voz se escuchaba "cada vez más cortada"
+
+**Síntoma.** Cuanto más se usaba el servicio, peor se oía. El usuario lo
+describió como "cada vez se escucha más cortado".
+
+**Causa raíz (dos, y las dos importaban).**
+
+1. **El audio se reproducía desde Kompa, por SMB.** El log lo delataba:
+   `mpv CMD enviado {"value":"...audio-cache\\...wav"}` y, 45 segundos después,
+   `mpv poll {"pos":null}` -> **mpv no avanzaba**. Medido en frío: abrir un WAV
+   de 865 KB desde Kompa tardó **más de 400 s**; el mismo archivo en local se
+   abre al instante. La voz local de Windows pesa unas 10 veces más que el
+   MP3 de edge-tts, así que al entrar el respaldo el problema se agravó.
+2. **El ducking se encadenaba.** `newv = prev x (1 - pct)` se calculaba sobre
+   el volumen **actual**, no sobre el original: 22 -> 13 -> 8 -> 5 -> 3 -> 1.
+   El volumen de Chrome llegó a estar en **1 %**. Cada locución nacía más baja
+   que la anterior: eso es exactamente "cada vez más cortado".
+
+**Arreglo.**
+
+- `src/synthesis/edge.js`: el audio que se reproduce se copia a **disco local**
+  (`%TEMP%\ciudadan-audio-local\`) y mpv lo reproduce desde ahí. El cache en
+  Kompa se conserva (para no resintetizar), pero **nunca se reproduce desde la
+  red**. Los archivos locales de más de 10 min se limpian solos.
+- `src/multimedia/controller.js`: `resetAppVolume(appKey)` pone el volumen de
+  esa app al **100** y deja ese 100 como **nuevo original**, de modo que la
+  siguiente atenuación parta de 100 y no se encadene.
+
+**Cómo se comprobó.** Antes: `loadfile` -> `Terminado` = **85 s** para 40 s de
+audio (con `pos:null` en medio). Después: `loadfile` -> `end-file` = **17 s**
+para 17 s de audio (coincidencia exacta) y sin ningún `pos:null`.
+
+## 20. El volumen quedaba bajo y no se veía en la barra
+
+**Síntoma.** "Le bajas el volumen pero en la barra no se baja" y "dejaste el
+volumen bajado".
+
+**Causa raíz.** El ducking baja la **sesión del mezclador** de la app
+(`SimpleAudioVolume` de pycaw), que es la barra de la app, no la barra del
+dispositivo. Y el "restaurar" devolvía el valor original (17-22 %), que en ese
+equipo era bajo de partida. Con el encadenamiento (19) el valor se disparaba
+hacia 0 y ya no se recuperaba solo.
+
+**Arreglo.**
+
+- Botón **"Subir al 100 ahora"** en el panel, **uno por cada fuente de
+  audio** (navegador, spotify, vlc...). Llama a
+  `POST /api/v1/multimedia/volume-reset` con `{appKey}`.
+- El endpoint pone las sesiones de esa app al 100 **y** actualiza el original
+  guardado, para que el ducking siguiente calcule 100 x (1 - %) y no se
+  encadene.
+- No se toca el volumen maestro ni el volumen interno de mpv.
+
+**Cómo se comprobó.** `POST /api/v1/multimedia/volume-reset {"appKey":"navegador"}`
+-> `ok:true, restored:[chrome]`; log: `[navegador] volumen restaurado
+{sesiones:["chrome(17056)"]}`. Chrome estaba en **1 %** -> pasó a **100 %**.
+
+## 21. Una locución se perdía cada vez que se reiniciaba el TTS
+
+**Síntoma.** "Deja los DSHs de modo que ya vayan a consumir el servicio sin
+tenerlos que estar tocando cuando hagas cambios en el servicio TTS".
+
+**Causa raíz.** `dsh-bridge/lib/index.js` hacía **una sola** petición con
+timeout de 10 s. Durante el reinicio del coordinator el puerto 3199 no acepta
+conexiones -> la petición fallaba -> **la locución se perdía para siempre**,
+sin reintento.
+
+**Arreglo.** El bridge ahora reintenta hasta 5 veces con espera creciente
+(1, 2, 4, 8, 15 s) y timeout de 15 s. Los errores 4xx (petición incorrecta) no
+se reintentan; los de conexión o 5xx, sí. El agente **no se bloquea**: si tras
+todos los intentos falla, se avisa y se sigue.
+
+> **Nota de despliegue:** este cambio vive en el repositorio del bridge. Para
+> que un DSH ya en ejecución lo use hay que reiniciar **ese** DSH **una vez**.
+> A partir de ahí, los cambios del TTS **no** requieren tocar los DSH: el
+> bridge lee el token del archivo en cada llamada y habla por HTTP.
+
+---
+
+# Procedimiento para cambiar el TTS sin tocar los DSH
+
+1. Editar en el workspace (`K:\agente2ciudadanmex\ciudadan-tts-coordinator`).
+2. `node --check` de cada archivo tocado.
+3. Copiar **archivo por archivo** al runtime
+   (`\\192.168.1.7\Kompa\_ciudadan-tts-coordinator\runtime`) y **verificar el
+   hash**: `robocopy` puede saltarse un archivo si el destino parece más
+   nuevo (ya pasó: el `controller.js` se quedó sin desplegar y el endpoint
+   devolvió `resetAppVolume is not a function`).
+4. Reiniciar **solo** el coordinator (el watchdog no toca nada más). El
+   arranque tarda ~6 s.
+5. Verificar: `GET /api/v1/health` = 200, **un** proceso node con el patrón
+   `node "\\192.168.1.7\...\runtime\src\server\index.js"` y **un** listener en
+   el 3199.
+6. **No** reiniciar DSH1, DSH2 ni Dany. Si mandan una locución durante los 6 s
+   del reinicio, el bridge la reintenta (tras activar el cambio con un único
+   reinicio del DSH).
+
+> **Trampa de conteo:** un filtro de PowerShell que busque `server*index.js`
+> coincide con el propio texto del comando de diagnóstico y cuenta falsos
+> coordinators. Contar por `Name -eq 'node.exe'` **y** comprobar el listener
+> del 3199.

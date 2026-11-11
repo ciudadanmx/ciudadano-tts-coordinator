@@ -3,7 +3,7 @@
 
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, mkdir, readdir, stat, unlink } from 'node:fs/promises'
-import { statSync } from 'node:fs'
+import { statSync, mkdirSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -118,7 +118,9 @@ export class EdgeSynthesizer {
         const cached = await readFile(cachePath)
         if (cached.length > 32) {
           logger.debug('Cache hit', { voice, key })
-          return { audio: cached, path: cachePath, mime: 'audio/mpeg', cached: true }
+          // Se reproduce desde disco LOCAL: mpv leyendo por SMB se atasca.
+          const localPath = this._localPlayback(cached, '.mp3')
+          return { audio: cached, path: localPath, mime: 'audio/mpeg', cached: true, cachePath }
         }
       } catch { /* no está en cache */ }
     }
@@ -219,7 +221,13 @@ export class EdgeSynthesizer {
         // se borraba en el camino de exito y se acumulaban miles de carpetas
         // 'ciudadan-edge-*' en %TEMP% (291 MB y contando).
         await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
-        return { audio, path: cachePath, mime: 'audio/mpeg', cached: false }
+        // REPRODUCCION DESDE DISCO LOCAL (11/11/2026): mpv leia el audio desde
+        // Kompa por SMB y se quedaba atascado ('mpv poll' con pos=null durante
+        // 45 s, y un WAV de 865 KB tardaba >400 s en abrir). Medido: leer por
+        // red hace que la voz se oiga cortada. Se copia a local y se reproduce
+        // desde ahi; el cache en Kompa se conserva para no resintetizar.
+        const localPath = this._localPlayback(audio, '.mp3')
+        return { audio, path: localPath, mime: 'audio/mpeg', cached: false, cachePath }
       }
       // Sin cache: el MP3 debe sobrevivir hasta que el reproductor lo use, pero
       // tampoco en %TEMP%: se deja en el stateDir (Kompa), dentro de audio-cache/tmp,
@@ -238,18 +246,36 @@ export class EdgeSynthesizer {
   }
 
   /**
-   * Guarda el audio de la voz local de respaldo. El WAV no se mete en el cache
-   * de MP3 (son formatos distintos): se deja en audio-cache/tmp para que lo
-   * consuma el reproductor y lo limpie el purger por antigüedad.
+   * Copia el audio a DISCO LOCAL para que mpv lo reproduzca sin pasar por la
+   * red. Medido el 11/11/2026: con el archivo en Kompa (SMB), mpv se quedaba
+   * atascado ('pos:null' durante 45 s) y la voz se oia cortada; desde local
+   * arranca al instante. Los archivos viejos (>10 min) se limpian aqui mismo,
+   * sin depender del limpiador.
+   */
+  _localPlayback(audio, ext = '.mp3') {
+    const dir = join(tmpdir(), 'ciudadan-audio-local')
+    try { mkdirSync(dir, { recursive: true }) } catch { /* ignore */ }
+    try {
+      const cutoff = Date.now() - 10 * 60 * 1000
+      for (const f of readdirSync(dir)) {
+        const p = join(dir, f)
+        try { if (statSync(p).mtimeMs < cutoff) unlinkSync(p) } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+    const p = join(dir, `${randomUUID()}${ext}`)
+    writeFileSync(p, audio)
+    return p
+  }
+
+  /**
+   * Guarda el audio de la voz local de respaldo. El WAV no entra en el cache de
+   * MP3 (son formatos distintos) y NO se deja en Kompa: se reproduce desde
+   * disco LOCAL, porque mpv leyendo por SMB se atasca y la voz sale cortada.
    */
   async _persist(audio, cachePath, tmpDir, mime, ext) {
-    const { writeFile } = await import('node:fs/promises')
-    const persistDir = join(this.cacheDir, 'tmp')
-    await mkdir(persistDir, { recursive: true })
-    const persistPath = join(persistDir, `${randomUUID()}${ext}`)
-    await writeFile(persistPath, audio)
+    const localPath = this._localPlayback(audio, ext)
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
-    return { audio, path: persistPath, mime, cached: false, _tmpDir: persistDir, fallback: true }
+    return { audio, path: localPath, mime, cached: false, fallback: true }
   }
 
   _runEdgeTts(text, voice, outFile, textFile) {

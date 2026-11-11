@@ -60,27 +60,49 @@ export function apply(ctx, config) {
       console.warn('[ciudadan-bridge] No hay token CIUDADAN_TTS_TOKEN — no se puede enviar al coordinador')
       return { ok: false, error: 'no token' }
     }
-    try {
-      const res = await fetch(`${cfg.coordinatorUrl}/api/v1/speech`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${tok}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(10000),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        console.warn(`[ciudadan-bridge] Coordinador respondió ${res.status}:`, data.error?.message || data.error || '')
-        return { ok: false, error: data.error?.message || `HTTP ${res.status}` }
+    // REINTENTOS (11/11/2026): el coordinador se reinicia al desplegar cambios
+    // del TTS y durante esos segundos el puerto 3199 no acepta conexiones.
+    // Sin reintento, la locución se perdia para siempre y el usuario no oia
+    // nada. Ahora se reintenta con espera creciente: si el servicio vuelve,
+    // la locución entra. El agente NO se bloquea (el reintento corre en
+    // segundo plano y el error final se reporta igual que antes).
+    const intentos = Number(cfg.retryAttempts ?? 5)
+    const esperaBase = Number(cfg.retryDelayMs ?? 1000)
+    let ultimoError = ''
+    for (let intento = 1; intento <= intentos; intento++) {
+      try {
+        const res = await fetch(`${cfg.coordinatorUrl}/api/v1/speech`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${tok}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(Number(cfg.requestTimeoutMs ?? 15000)),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          // Un 4xx es un error de la petición (no del servicio): no se reintenta.
+          if (res.status >= 400 && res.status < 500) {
+            console.warn(`[ciudadan-bridge] Coordinador respondió ${res.status}:`, data.error?.message || data.error || '')
+            return { ok: false, error: data.error?.message || `HTTP ${res.status}` }
+          }
+          ultimoError = data.error?.message || `HTTP ${res.status}`
+        } else {
+          return { ok: true, ...data }
+        }
+      } catch (e) {
+        ultimoError = e.message
       }
-      return { ok: true, ...data }
-    } catch (e) {
-      // El coordinador no está disponible — no bloquear al agente
-      console.warn(`[ciudadan-bridge] Coordinador no disponible: ${e.message}`)
-      return { ok: false, error: e.message }
+      if (intento < intentos) {
+        const espera = Math.min(15000, esperaBase * Math.pow(2, intento - 1))
+        console.warn(`[ciudadan-bridge] Intento ${intento}/${intentos} falló (${ultimoError}); reintento en ${espera} ms`)
+        await new Promise(r => setTimeout(r, espera))
+      }
     }
+    // El coordinador no está disponible — no bloquear al agente
+    console.warn(`[ciudadan-bridge] Coordinador no disponible tras ${intentos} intentos: ${ultimoError}`)
+    return { ok: false, error: ultimoError }
   }
 
   // Registrar metadatos de sesión cuando cambian
