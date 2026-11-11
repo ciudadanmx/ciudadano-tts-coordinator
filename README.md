@@ -161,6 +161,29 @@ node --test tests/                    # 23 tests (cola + texto)
 powershell -File scripts/test-coordinator.ps1 -Token <token>  # 9 tests end-to-end
 ```
 
+## Documentación
+
+| Documento | Para qué sirve |
+|---|---|
+| [docs/historia-de-errores.md](docs/historia-de-errores.md) | **Errores reales que han pasado y cómo se arreglaron** (voz entrecortada, config que se revierte, ducking en stub, disco lleno, watchdog…). Consultar primero si algo vuelve a fallar. |
+| [docs/trampas-mpv-y-cola.md](docs/trampas-mpv-y-cola.md) | Trampas de mpv, de la cola y del runtime en Kompa (UNC). |
+| [docs/multimedia-windows.md](docs/multimedia-windows.md) | Ducking por app en Windows (pausar / reducir / ignorar). |
+| [docs/arquitectura.md](docs/arquitectura.md) | Cómo está montado el servicio. |
+| [docs/integracion-voz-claude-code.md](docs/integracion-voz-claude-code.md) | Hook de Claude Code. |
+
+### Respaldo de voz local
+
+`edge-tts` depende de internet y se cuelga de forma intermitente. El
+coordinator arranca además un **daemon de voz de Windows** (`System.Speech`,
+sin internet) que actúa de respaldo: si `edge-tts` no contesta en 35 s, la
+locución se sirve con la voz local en lugar de perderse.
+
+```powershell
+# Estado del respaldo en el log
+Select-String -Path "\\192.168.1.7\Kompa\_ciudadan-tts-coordinator\state\server-stdout.log" `
+  -Pattern "Respaldo de voz local listo|Locucion servida con la voz local"
+```
+
 ## Requisitos
 
 - Windows 11

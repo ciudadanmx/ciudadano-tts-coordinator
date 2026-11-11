@@ -32,6 +32,12 @@ logger.info(`Token generado/disponible en ${process.env.CIUDADAN_TTS_TOKEN ? 'en
 
 // Componentes
 const synthesizer = new EdgeSynthesizer(config)
+// RESPALDO DE VOZ LOCAL (10/11/2026): edge-tts depende de internet y se cuelga
+// de forma intermitente (medido: 2 de 3 pruebas de 120 s sin escribir un byte).
+// El daemon de voz de Windows se arranca aqui, en segundo plano, para que su
+// motor este cargado ANTES de la primera locucion: cargarlo en frio cuesta
+// ~15 s y con el motor caliente responde en menos de 1 s.
+synthesizer.warmup?.()
 const player = new MpvPlayer(config)
 const sessions = new SessionRegistry(config)
 // Fuentes de voz (agentes/servicios). Registro extensible y persistente.

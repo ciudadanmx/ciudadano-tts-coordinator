@@ -6,8 +6,9 @@ import { mkdtemp, readFile, rm, mkdir, readdir, stat, unlink } from 'node:fs/pro
 import { statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { logger } from '../monitoring/logger.js'
+import { WindowsSapi } from './windows-sapi.js'
 
 // El catálogo de voces no cambia: se cachea 10 min para no invocar edge-tts cada vez.
 const VOICE_CATALOG_TTL_MS = 10 * 60 * 1000
@@ -25,8 +26,31 @@ export class EdgeSynthesizer {
     this.cacheDir = config.synthesis?.cacheDir || join(tmpdir(), 'ciudadan-tts-cache')
     this.cacheEnabled = config.synthesis?.cacheEnabled !== false
     this.cacheMaxBytes = (config.synthesis?.cacheMaxMb || 200) * 1024 * 1024
+    // Respaldo local (voz de Windows, sin internet): si edge-tts no contesta
+    // a tiempo, la locución suena igual con la voz local en vez de perderse.
+    this.localFallback = config.synthesis?.localFallback !== false
+    this.fallbackAfterMs = config.synthesis?.fallbackAfterMs || 40000
+    this._sapi = this.localFallback ? new WindowsSapi() : null
     this._catalogCache = null
     this._ensureCacheDir()
+  }
+
+  /**
+   * Arranca en segundo plano el daemon de voz local (respaldo). Se llama al
+   * iniciar el servidor para que su motor quede cargado antes de la primera
+   * locucion: en frio cuesta ~15 s, en caliente responde en <1 s.
+   */
+  warmup() {
+    if (!this._sapi) return
+    const t = setTimeout(() => {
+      this._sapi._ensure()
+        .then((ok) => {
+          if (ok) logger.info('Respaldo de voz local listo', { voice: this._sapi.voice })
+          else logger.warn('El respaldo de voz local no arranco', { error: this._sapi.lastError })
+        })
+        .catch(() => {})
+    }, 1500)
+    if (t.unref) t.unref()
   }
 
   /** Comando real de síntesis: [python, -m, edge_tts, ...] o el binario directo. */
@@ -109,7 +133,77 @@ export class EdgeSynthesizer {
       // los acentos se perdían ("Ó" -> "?") al sintetizar.
       const { writeFile: writeFileUtf8 } = await import('node:fs/promises')
       await writeFileUtf8(textFile, cleanText, 'utf8')
-      await this._runEdgeTts(cleanText, voice, outFile, textFile)
+
+      // CARRERA (10/11/2026): edge-tts depende de internet y se cuelga con
+      // facilidad. Si no contesta en fallbackAfterMs, entra la voz LOCAL de
+      // Windows (sin internet, <1 s con el motor caliente) y gana la que
+      // termine primero. Así la locución NUNCA se pierde ni queda en silencio.
+      const edgePromise = this._runEdgeTts(cleanText, voice, outFile, textFile)
+      let resolveLocal = null
+      const localSignal = new Promise((resolve) => { resolveLocal = resolve })
+      let fallbackTimer = null
+      let localLanzado = false
+      const wavPath = join(tmpDir, 'local.wav')
+      const lanzarLocal = () => {
+        if (localLanzado) return
+        localLanzado = true
+        logger.warn('edge-tts no contesta: entra la voz local de respaldo', {
+          voice, textLen: cleanText.length,
+        })
+        this._sapi.synthesize(cleanText, wavPath, { timeoutMs: 90000 })
+          .then((r) => resolveLocal(r
+            ? { ok: true, source: 'local', bytes: r.bytes, path: wavPath }
+            : { ok: false, source: 'local' }))
+          .catch(() => resolveLocal({ ok: false, source: 'local' }))
+      }
+      if (this._sapi) {
+        fallbackTimer = setTimeout(lanzarLocal, this.fallbackAfterMs)
+      }
+
+      // edgePromise se convierte en un resultado (nunca una excepción) para que
+      // un fallo de edge-tts NO termine la carrera: en ese caso gana el local.
+      const edgeOutcome = edgePromise.then(
+        () => ({ ok: true, source: 'edge' }),
+        (e) => ({ ok: false, source: 'edge', error: e })
+      )
+
+      let winner
+      try {
+        winner = await Promise.race([edgeOutcome, localSignal])
+      } finally {
+        if (fallbackTimer) clearTimeout(fallbackTimer)
+      }
+
+      // Si el local falló (o no existía), se espera a edge-tts.
+      if (!winner || winner.ok === false) {
+        if (winner && winner.source === 'edge' && winner.error) {
+          // edge-tts falló: si el local no llegó a tiempo, se le da su oportunidad.
+          if (this._sapi && !localLanzado) {
+            lanzarLocal()
+            const local = await Promise.race([
+              localSignal,
+              new Promise((r) => setTimeout(() => r({ ok: false }), 90000)),
+            ])
+            if (local && local.ok) winner = local
+          }
+          if (!winner || winner.ok === false) throw winner?.error || new Error('no se pudo sintetizar')
+        } else {
+          winner = await edgeOutcome
+          if (!winner.ok) throw winner.error
+        }
+      }
+
+      if (winner.source === 'local') {
+        // Ganó la voz local: el WAV ya está escrito en tmpDir.
+        const audio = await readFile(wavPath)
+        if (!audio || audio.length < 512) throw new Error('la voz local devolvio audio vacio')
+        logger.info('Locucion servida con la voz local de respaldo', {
+          voice, bytes: audio.length, textLen: cleanText.length,
+        })
+        return await this._persist(audio, cachePath, tmpDir, 'audio/wav', '.wav')
+      }
+      // edge terminó sin error: seguir con el MP3.
+
       const audio = await readFile(outFile)
       if (!audio || audio.length < 32) throw new Error('edge-tts produced empty audio')
 
@@ -141,6 +235,21 @@ export class EdgeSynthesizer {
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
       throw e
     }
+  }
+
+  /**
+   * Guarda el audio de la voz local de respaldo. El WAV no se mete en el cache
+   * de MP3 (son formatos distintos): se deja en audio-cache/tmp para que lo
+   * consuma el reproductor y lo limpie el purger por antigüedad.
+   */
+  async _persist(audio, cachePath, tmpDir, mime, ext) {
+    const { writeFile } = await import('node:fs/promises')
+    const persistDir = join(this.cacheDir, 'tmp')
+    await mkdir(persistDir, { recursive: true })
+    const persistPath = join(persistDir, `${randomUUID()}${ext}`)
+    await writeFile(persistPath, audio)
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+    return { audio, path: persistPath, mime, cached: false, _tmpDir: persistDir, fallback: true }
   }
 
   _runEdgeTts(text, voice, outFile, textFile) {

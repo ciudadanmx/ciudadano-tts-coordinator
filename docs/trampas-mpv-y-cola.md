@@ -733,3 +733,51 @@ Si el MP3 necesita sobrevivir (cache deshabilitado), se escribe en
 
 Nada se borra sin mover antes: todo queda recuperable en Kompa.
 
+
+### 24. La voz entrecortada: edge-tts se cuelga y no hay salida
+
+**Sintoma.** La locucion arranca y se corta; a veces hay silencio de minutos y
+la frase se pierde.
+
+**Por que.** `edge-tts` habla con el servicio de Microsoft por internet. Medido
+el 10/11/2026 en este equipo: dos de tres pruebas pasaron de **120 s sin escribir
+un solo byte** y la tercera tardo 87 s (antes 23-39 s). Con timeout de 90 s y
+tres intentos, una locucion agotaba **270 s de silencio**.
+
+**Arreglo (ya implementado).**
+
+1. **Carrera de sintetizadores** (`src/synthesis/edge.js`): si `edge-tts` no
+   contesta en `fallbackAfterMs` (35 s), entra la voz local de Windows
+   (`System.Speech`, sin internet) y gana la que termine primero. Si
+   `edge-tts` falla de golpe, el local tambien tiene su oportunidad.
+2. **Daemon persistente** (`scripts/sapi-voice.ps1` +
+   `src/synthesis/windows-sapi.js`): motor de voz cargado una vez (~15 s en
+   frio, **<1 s en caliente**). Se calienta al arrancar el servidor
+   (`synthesizer.warmup()`).
+3. El fallback produce **WAV** (no MP3): mpv lo reproduce igual y el audio se
+   deja en `state/audio-cache/tmp` para que lo limpie el purger.
+
+**Trampas de este mecanismo (no repetirlas).**
+
+- `powershell.exe` **no abre scripts por ruta UNC**: el cliente copia el `.ps1`
+  a `%TEMP%\ciudadan-tts-sapi\` (nombre con hash) y lo ejecuta desde ahi.
+- `Write-Output` **se bufferiza** en PowerShell: usar
+  `[Console]::Out.WriteLine(...)` + `Flush()`, o el daemon arranca "mudo".
+- El resultado del respaldo debe llevar `source: 'local'`; sin esa etiqueta el
+  codigo cae en la rama de edge-tts y busca un `out.mp3` inexistente
+  (`ENOENT`).
+- `System.Speech` es de .NET Framework: existe en **Windows PowerShell 5.1**
+  (`powershell.exe`), no en PowerShell 7 (`pwsh`).
+- La voz local disponible en espanol es `Microsoft Sabina Desktop` (es-MX);
+  `Microsoft Raul` y `Microsoft Sabina` tambien estan pero aparecen
+  deshabilitadas en `GetInstalledVoices()`.
+
+**Como verificar que el respaldo esta vivo.**
+
+```powershell
+Select-String -Path "\\192.168.1.7\Kompa\_ciudadan-tts-coordinator\state\server-stdout.log" `
+  -Pattern "Respaldo de voz local listo|Locucion servida con la voz local"
+```
+
+La historia completa de errores (con causa y evidencia) esta en
+`docs/historia-de-errores.md`.
