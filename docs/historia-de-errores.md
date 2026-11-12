@@ -561,3 +561,45 @@ correcta; en el primer elemento ▲ avisa «ya está al principio».
 
 **Regla nueva.** En la cola, **toda** operación del panel (mover, reproducir
 ahora) debe razonar sobre la lista **visible**, no sobre el array interno.
+
+---
+
+## 25. El panel "anda trabado": el botón de pausa mentía y el doble clic silenciaba el TTS
+
+**Síntoma.** El panel parecía trabado: el botón de pausa se quedaba en
+«▶ REANUDAR» sin que hubiera nada pausado, y el TTS se quedaba **mudo** sin
+que nadie lo hubiera pausado (nada sonaba y el panel no avanzaba).
+
+**Causa raíz (dos, en la misma función).**
+
+1. `GET /api/v1/status` tomaba el estado de pausa de **`player.isPaused()`**, o
+   sea del **mpv**. Pero el mpv se lanza con `--idle=yes`: en reposo, sin
+   archivo cargado, `isPaused()` devuelve **true**. El status, por tanto,
+   reportaba «pausado» siempre que no hubiera nada sonando → el botón del
+   panel ponía «▶ REANUDAR» mentirosamente y pulsarlo no cambiaba nada
+   (`resume` sobre un mpv que no estaba pausado no hace nada). El usuario
+   veía un control que no respondía y loTOMABA por un TTS trabado.
+2. `togglePause()` leía el estado y luego pausaba/reanudaba **sin candado**.
+   Con un **doble clic** (dos llamadas concurrentes a 50 ms) las dos leían
+   `paused:false` y las dos **pausaban**: el TTS quedaba pausado para siempre
+   (y el botón, por el punto 1, no lo delataba).
+
+**Arreglo.**
+
+- El servidor mantiene el estado de pausa **del TTS** (`ttsPaused`), lo activa
+  en `/api/v1/playback/pause`, lo limpia en `/api/v1/playback/resume` y lo
+  publica en `/api/v1/status`. Ya no se pregunta al mpv.
+- `togglePause()` usa un candado (`__pauseBusy`): mientras hay un cambio en
+  curso, las pulsaciones adicionales se ignoran, y el botón se deshabilita
+  durante la operación para que no parezca que no responde.
+
+**Cómo se comprobó.** En un navegador real (headless, CDP) contra el panel
+servido: en reposo `paused:false` y botón «⏸ PAUSAR»; doble clic (50 ms)
+pausa **una** vez (botón «▶ REANUDAR»); doble clic desde pausado **reanuda**;
+clic simple alterna bien; 0 excepciones de JavaScript.
+
+**Regla nueva.** El estado de pausa que ve el usuario es el del **TTS**, no el
+del reproductor: un reproductor en reposo no es «una locución pausada». Y
+ningún control que altere un estado compartido puede quedar a medias con dos
+pulsaciones rápidas: hay que poner un candado o una operación atómica.
+

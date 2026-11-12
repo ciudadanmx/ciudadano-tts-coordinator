@@ -779,5 +779,21 @@ Select-String -Path "\\192.168.1.7\Kompa\_ciudadan-tts-coordinator\state\server-
   -Pattern "Respaldo de voz local listo|Locucion servida con la voz local"
 ```
 
+## 12. El estado de pausa es del TTS, no del mpv
+
+El mpv se lanza con `--idle=yes`: **en reposo, sin archivo cargado,
+`isPaused()` devuelve `true`**. Si el estado de pausa que ve el panel se lee
+del reproductor, el botón se queda en «▶ REANUDAR» aunque no haya nada
+pausado y el panel «parece trabado» (error 25 de
+`docs/historia-de-errores.md`).
+
+**Regla**: el servidor guarda el estado de pausa del TTS (`ttsPaused`), lo
+publica en `/api/v1/status` y lo cambia solo en `/api/v1/playback/pause` y
+`/api/v1/playback/resume`. Además, `togglePause()` lleva un candado
+(`__pauseBusy`): sin él, un doble clic (dos toggles concurrentes a 50 ms) hace
+**dos pausas** y el TTS se queda mudo para siempre.
+
+---
+
 La historia completa de errores (con causa y evidencia) esta en
 `docs/historia-de-errores.md`.

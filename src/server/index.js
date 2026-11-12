@@ -46,6 +46,11 @@ const sources = new SourceRegistry(config)
 const dshTitles = new DshTitleResolver()
 const multimedia = new MultimediaController(config)
 
+// Estado de pausa DEL TTS (no del mpv). El mpv arranca en idle y en idle
+// isPaused() devuelve true: el status mentia y el boton del panel ponia
+// "REANUDAR" sin que hubiera nada pausado (el panel "parecia trabado").
+let ttsPaused = false
+
 // Un título con U+FFFD ("�") está corrupto por codificación: no se usa para hablar.
 function tituloLimpio(t) {
   if (!t) return ''
@@ -167,7 +172,10 @@ route('GET', '/api/v1/health', (req, res) => {
 
 // Status general
 route('GET', '/api/v1/status', async (req, res) => {
-  const paused = await player.isPaused().catch(() => false)
+  // `paused` es el estado de pausa del TTS. Antes se leia player.isPaused(),
+  // que en idle (mpv sin archivo) devuelve true: el panel moria al mostrar
+  // "REANUDAR" y el TTS parecia trabado.
+  const paused = ttsPaused
   const st = queue.getStatus()
   if (st.current && st.current.sessionId) {
     st.current = { ...st.current, sessionName: displayName(st.current.sessionId, st.current.sessionTitle, st.current.source) }
@@ -383,10 +391,12 @@ route('POST', '/api/v1/history/prev', async (req, res) => {
 // Playback controls
 route('POST', '/api/v1/playback/pause', async (req, res) => {
   await player.pause()
+  ttsPaused = true
   sendJson(res, 200, { ok: true, paused: true })
 })
 route('POST', '/api/v1/playback/resume', async (req, res) => {
   await player.resume()
+  ttsPaused = false
   sendJson(res, 200, { ok: true, resumed: true })
 })
 route('POST', '/api/v1/playback/stop', async (req, res) => {
@@ -1018,11 +1028,27 @@ async function playNow(el) {
   } catch (e) { flash('❌ ' + e.message) }
   await refresh();
 }
+// Pausa/reanudacion: un toggle por pulsacion. Sin este candado, un doble clic
+// (50 ms) hacia DOS toggles concurrentes: ambos leian paused=false y ambos
+// pausaban -> el TTS quedaba mudo para siempre con el boton en "REANUDAR".
+var __pauseBusy = false;
 async function togglePause() {
-  const s = await api('/api/v1/status');
-  if (s.paused) await api('/api/v1/playback/resume', { method: 'POST' });
-  else await api('/api/v1/playback/pause', { method: 'POST' });
-  await refresh();
+  if (__pauseBusy) return;
+  __pauseBusy = true;
+  const bp = document.getElementById('btnPause');
+  if (bp) bp.disabled = true;
+  try {
+    const s = await api('/api/v1/status');
+    if (s.paused) await api('/api/v1/playback/resume', { method: 'POST' });
+    else await api('/api/v1/playback/pause', { method: 'POST' });
+    await refresh();
+  } catch (e) {
+    flash('❌ ' + e.message);
+  } finally {
+    __pauseBusy = false;
+    const b2 = document.getElementById('btnPause');
+    if (b2) b2.disabled = false;
+  }
 }
 async function prevReplay() {
   try {
