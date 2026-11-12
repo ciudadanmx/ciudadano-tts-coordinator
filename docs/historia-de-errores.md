@@ -603,3 +603,36 @@ del reproductor: un reproductor en reposo no es «una locución pausada». Y
 ningún control que altere un estado compartido puede quedar a medias con dos
 pulsaciones rápidas: hay que poner un candado o una operación atómica.
 
+---
+
+## 26. El selector de voces tardaba 43-75 s (y a veces no cargaba)
+
+**Síntoma.** Al abrir el selector de voces del panel (o el tab de fuentes de
+ajustes), el panel se quedaba «cargando catálogo de voces…» más de un minuto;
+a veces terminaba con «no se pudo cargar el catálogo».
+
+**Causa raíz.** El catálogo completo de voces se obtenía con
+`edge-tts --list-voices` **cada vez que expiraba la caché en memoria (10 min)
+y en cada arranque del servicio**. Con la red lenta ese comando tarda **43-75 s
+y a veces falla** (`aiohttp connection_lost`), y sin archivo en disco no había
+de dónde recuperarlo: el reinicio del servicio tiraba el catálogo junto con la
+caché.
+
+**Arreglo.**
+
+- El catálogo se **persiste en disco** (`<cacheDir>/voice-catalog.json`, con
+  escritura atómica `.tmp` + `rename`). El catálogo no cambia: se reutiliza el
+  del disco y no se vuelve a preguntar a `edge-tts`.
+- El purger de audio (LRU por antigüedad) **excluye** ese archivo: no es audio
+  y no se borra cuando el caché de MP3 supera su límite.
+
+**Cómo se comprobó.** Tras reiniciar el servicio: `GET /api/v1/voices` →
+**0.49 s** con 322 voces (163 femeninas / 159 masculinas) y las siguientes
+llamadas en 0.04 s; en el navegador, `openVoicePicker()` tarda **65 ms** y
+pinta el catálogo completo. Antes: 43 s (y a veces error).
+
+**Regla nueva.** Un recurso caro de obtener (catálogo de voces, lista de
+modelos, etc.) se persiste en disco, no solo en memoria: si no, cada reinicio
+del servicio lo deja de nuevo a merced de la red.
+
+

@@ -3,7 +3,7 @@
 
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, mkdir, readdir, stat, unlink } from 'node:fs/promises'
-import { statSync, mkdirSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs'
+import { statSync, mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync, existsSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -24,6 +24,11 @@ export class EdgeSynthesizer {
     this.python = config.synthesis?.edgePython || ''
     this.timeoutMs = config.synthesis?.timeoutMs || 30000
     this.cacheDir = config.synthesis?.cacheDir || join(tmpdir(), 'ciudadan-tts-cache')
+    // Catálogo de voces persistido en disco: `edge-tts --list-voices` tarda
+    // ~75 s (y con la red lenta puede no contestar), así que sin este archivo
+    // el selector de voces del panel se quedaba "cargando" más de un minuto
+    // en cada arranque del servicio y cada vez que expiraba el TTL.
+    this.catalogPath = join(this.cacheDir, 'voice-catalog.json')
     this.cacheEnabled = config.synthesis?.cacheEnabled !== false
     this.cacheMaxBytes = (config.synthesis?.cacheMaxMb || 200) * 1024 * 1024
     // Respaldo local (voz de Windows, sin internet): si edge-tts no contesta
@@ -94,6 +99,8 @@ export class EdgeSynthesizer {
         entries.sort((a, b) => a.mtime - b.mtime) // LRU: más viejos primero
         for (const e of entries) {
           if (total <= this.cacheMaxBytes) break
+          // El catálogo de voces NO es audio: no se borra con el purger.
+          if (e.p === this.catalogPath) continue
           await unlink(e.p).catch(() => {})
           total -= e.size
         }
@@ -437,6 +444,12 @@ export class EdgeSynthesizer {
     if (this._catalogCache && Date.now() - this._catalogCache.at < VOICE_CATALOG_TTL_MS) {
       return this._catalogCache.voices
     }
+    // Disco primero: el catálogo no cambia. Evita depender de edge-tts (75 s).
+    const persisted = this._readCatalogFile()
+    if (persisted && persisted.length) {
+      this._catalogCache = { at: Date.now(), voices: persisted }
+      return persisted
+    }
     const voices = await new Promise((resolve, reject) => {
       const cmd = this._cmd(['--list-voices'])
       const proc = spawn(cmd.file, cmd.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
@@ -478,7 +491,33 @@ export class EdgeSynthesizer {
       proc.on('error', reject)
     })
     this._catalogCache = { at: Date.now(), voices }
+    this._writeCatalogFile(voices)
     return voices
+  }
+
+  /** Lee el catálogo de voces persistido en disco (si existe). */
+  _readCatalogFile() {
+    try {
+      if (!existsSync(this.catalogPath)) return null
+      const data = JSON.parse(readFileSync(this.catalogPath, 'utf8'))
+      return Array.isArray(data?.voices) ? data.voices : null
+    } catch (e) {
+      logger.warn('Catálogo de voces ilegible en disco; se regenerará', { error: e.message })
+      return null
+    }
+  }
+
+  /** Persiste el catálogo de voces (escritura atómica: .tmp + rename). */
+  _writeCatalogFile(voices) {
+    try {
+      mkdirSync(this.cacheDir, { recursive: true })
+      const tmp = this.catalogPath + '.tmp'
+      writeFileSync(tmp, JSON.stringify({ at: new Date().toISOString(), voices }), 'utf8')
+      renameSync(tmp, this.catalogPath)
+      logger.info('Catálogo de voces guardado en disco', { voices: voices.length, path: this.catalogPath })
+    } catch (e) {
+      logger.warn('No se pudo guardar el catálogo de voces en disco', { error: e.message })
+    }
   }
 }
 
