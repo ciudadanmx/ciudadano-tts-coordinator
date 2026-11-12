@@ -379,6 +379,7 @@ Write-Line ("watcher del portapapeles activo | atajo registrado: {0} | {1}" -f `
 
 # --- bucle principal: procesa los eventos que encola el hilo del watcher ---
 # (el hilo de C# no puede llamar scriptblocks de PowerShell: no es seguro).
+$lastStatus = [DateTime]::MinValue
 try {
   while ($true) {
     $ev = $null
@@ -394,6 +395,19 @@ try {
       } elseif ($ev.StartsWith('TEXT|')) {
         Send-CopiedText $ev.Substring(5)
       }
+    }
+    # Re-reportar el estado cada 30 s: si el coordinador se reinicio, su estado
+    # en memoria queda en "no corriendo" hasta que el watcher se lo diga otra vez.
+    if (([DateTime]::Now - $lastStatus).TotalSeconds -ge 30) {
+      $lastStatus = [DateTime]::Now
+      $statusPayload = @{
+        running = $true
+        hotkeyRegistered = $watcher.HotkeyRegistered
+        hotkeyError = $watcher.HotkeyError
+        hotkey = 'Ctrl+Alt+R'
+        pid = $PID
+      } | ConvertTo-Json -Compress
+      $null = $watcher.HttpPost('/api/v1/clipboard/watcher-status', $statusPayload)
     }
     # el token puede rotarse: se relee de vez en cuando
     $t = Get-Token

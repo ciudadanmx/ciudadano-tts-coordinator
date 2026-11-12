@@ -476,3 +476,49 @@ servida (no se guarda en el historial)`; el atajo simulado con `keybd_event`
 alternó `enabled` (True -> False); imagen ignorada; texto de 4200 caracteres
 recortado a 2000; con la captura apagada no se lee; DSH1/DSH2 siguieron
 sonando durante toda la prueba.
+
+
+---
+
+## 23. El panel quedó en blanco (sin colas ni configuración) pero la API funcionaba
+
+**Síntoma.** El servicio respondía bien (`/api/v1/health` 200, las locuciones
+sonaban) pero el panel web no mostraba ni la cola, ni las fuentes, ni la
+configuración: se veía la página vacía. Parecía que "el panel no funciona".
+
+**Causa raíz.** El HTML del panel es un **template literal** (backticks) en
+`src/server/index.js` (`const html = \`<!DOCTYPE html>...\``). Dentro de ese
+template, los escapes de los strings JS embebidos se colapsan al servir:
+
+- `onclick="vol100(\'' + esc(a.appKey) + '\')"` sirvió como
+  `onclick="vol100('' + esc(a.appKey) + '')"` → `SyntaxError`.
+- Los `\n` de los `confirm(...)` sirvieron como saltos de línea reales dentro
+  de strings de una línea → otro `SyntaxError`.
+
+Un solo error de sintaxis mata TODO el `<script>`: no se ejecuta ni `refresh()`,
+ni `refreshSources()`, ni nada → panel en blanco. La API seguía bien porque el
+error solo está en el HTML servido.
+
+**Arreglo.**
+
+- El botón usa `data-app="..."` + `onclick="vol100(this.dataset.app)"` (sin
+  comillas anidadas).
+- Los `confirm(...)` van en una sola línea (sin `\n`).
+- **Guard de regresión**: `scripts/check-panel-js.ps1` descarga `/`, extrae el
+  `<script>` inline y le pasa `node --check`. Ejecutarlo SIEMPRE antes de
+  reiniciar el coordinador tras tocar el HTML/JS del panel:
+  `powershell.exe -File scripts\check-panel-js.ps1` → debe dar `node --check = 0`.
+
+**Cómo se comprobó.** Antes: `node --check` del JS extraído de la página
+servida daba `SyntaxError: missing ) after argument list` en la línea del botón
+`vol100`. Después: `node --check = 0`, todos los elementos del panel presentes
+(`id="queue"`, `id="sources"`, `id="history"`, `id="mmApps"`, `id="cfgOverlay"`,
+`Leer portapapeles`...) y todos los endpoints del panel (`/api/v1/status`,
+`/api/v1/queue`, `/api/v1/sources`, `/api/v1/sessions`, `/api/v1/history`,
+`/api/v1/clipboard/status`, `/api/v1/multimedia/status`,
+`/api/v1/playback/volume`) responden 200 con `ok:true`.
+
+**Regla nueva para el procedimiento de despliegue**: tras editar el HTML/JS del
+panel, correr `scripts/check-panel-js.ps1` (contra el fuente o el servidor) y
+ver `node --check = 0` ANTES de reiniciar. Con Ctrl+F5 el navegador ya muestra
+el panel corregido.

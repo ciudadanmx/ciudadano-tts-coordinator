@@ -864,7 +864,7 @@ async function openCfg(focusApp) {
           '<option value="reduce"' + (a.mode==='reduce'?' selected':'') + '>Reducir</option>' +
           '<option value="ignore"' + (a.mode==='ignore'?' selected':'') + '>Ignorar</option></select></label>' +
         '<label>% reducción: <input type="range" id="cfgpct-' + esc(a.appKey) + '" data-pct="cfgpctv-' + esc(a.appKey) + '" min="0" max="100" value="' + a.percentage + '" style="width:120px" oninput="document.getElementById(this.dataset.pct).textContent=this.value"> <span id="cfgpctv-' + esc(a.appKey) + '">' + a.percentage + '</span>%</label>' +
-        '<br><button type="button" class="cfg-vol100" onclick="vol100(\'' + esc(a.appKey) + '\')">🔊 Subir al 100 ahora</button>' +
+        '<br><button type="button" class="cfg-vol100" data-app="' + esc(a.appKey) + '" onclick="vol100(this.dataset.app)">🔊 Subir al 100 ahora</button>' +
         '<span style="color:#888;font-size:11px"> (deja el 100 como volumen original)</span>' +
         '</div>');
     }
@@ -984,9 +984,7 @@ async function refreshClipboard() {
 async function toggleClipboard(want) {
   if (want) {
     // Aviso discreto de privacidad antes de activar la captura.
-    if (!confirm('Se leído en voz alta TODO lo que copies, incluso contraseñas o tokens.\n' +
-                 'El texto no se guarda en el historial y solo va al sintetizador TTS local.\n\n' +
-                 '¿Activar "Leer portapapeles"?')) {
+    if (!confirm('Se leerá en voz alta TODO lo que copies, incluso contraseñas o tokens. El texto no se guarda en el historial y solo va al sintetizador TTS local. ¿Activar "Leer portapapeles"?')) {
       const cb = document.getElementById('clipOn');
       if (cb) cb.checked = false;
       return;
@@ -1047,9 +1045,7 @@ async function toggleSource(el, enabled) {
   // una decisión consciente, asi que se pide confirmacion (tambien con el
   // interruptor "Leer portapapeles").
   if (id === 'clipboard' && want) {
-    if (!confirm('Se leído en voz alta TODO lo que copies, incluso contraseñas o tokens.\n' +
-                 'El texto no se guarda en el historial y solo va al sintetizador TTS local.\n\n' +
-                 '¿Activar "Leer portapapeles"?')) {
+    if (!confirm('Se leerá en voz alta TODO lo que copies, incluso contraseñas o tokens. El texto no se guarda en el historial y solo va al sintetizador TTS local. ¿Activar "Leer portapapeles"?')) {
       if (el && el.checked !== undefined) el.checked = false;
       return;
     }
