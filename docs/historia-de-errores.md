@@ -522,3 +522,42 @@ servida daba `SyntaxError: missing ) after argument list` en la línea del botó
 panel, correr `scripts/check-panel-js.ps1` (contra el fuente o el servidor) y
 ver `node --check = 0` ANTES de reiniciar. Con Ctrl+F5 el navegador ya muestra
 el panel corregido.
+
+---
+
+## 24. Las flechas de la cola movían cosas que no se veían (y el ▶ no sonaba)
+
+**Síntoma.** En la cola del panel, el botón ▲/▼ no cambiaba el orden visible y
+el ▶ «reproducir ahora» se quedaba en `queued` sin sonar.
+
+**Causa raíz (dos).**
+
+1. La cola tiene **dos listas**: `order` (interno, incluye lo ya reproducido) y la
+   lista **visible** (solo lo pendiente/sonando, que es lo que dibuja el panel).
+   El primer implementation movía el item dentro de `order`, así que la flecha
+   se movía entre entradas ya reproducidas: en pantalla **no se veía ningún
+   cambio**. Además `position` devolvía la posición interna (p. ej. 7) en vez de
+   la visible.
+2. `playNow` llamaba a `_pump()`, pero el pump ya estaba ocupado
+   (`this.processing === true`) sintetizando otra locución: la llamada se
+   ignoraba y el item priorizado esperaba su turno normal (decenas de segundos).
+
+**Arreglo.**
+
+- `moveInQueue()` trabaja sobre `_visibleIds()` (la lista que ve el usuario) y
+  `position` se calcula con `_visiblePosition()`.
+- `playNow()` marca `frontId`: `_next()` lo devuelve **antes** que el resto
+  (gana al round-robin entre fuentes) y el marcador se limpia al servirse.
+- `playNow()` lanza **la síntesis del item prioritario en el momento**
+  (`_preSynth`), para que suene en cuanto termine la locución que se está
+  reproduciendo. Además sigue deteniendo la que esté **sonando**
+  (`stopCurrent()`).
+
+**Cómo se comprobó.** Con una locución larga sonando (`A`) y otra en cola (`B`):
+`POST /api/v1/queue/<B>/play-now` → `{"ok":true,"stopped":true,"position":1}`;
+`A` queda `cancelled`/`skipped` y **B suena 1 s después**. Las flechas: mover
+abajo y arriba cambian el orden visible y devuelven la posición visible
+correcta; en el primer elemento ▲ avisa «ya está al principio».
+
+**Regla nueva.** En la cola, **toda** operación del panel (mover, reproducir
+ahora) debe razonar sobre la lista **visible**, no sobre el array interno.

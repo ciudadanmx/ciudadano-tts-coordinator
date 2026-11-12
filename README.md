@@ -17,7 +17,11 @@ anuncios de tarea, lectura completa de Markdown y control multimedia de Windows.
 - ✅ **Control multimedia** — reduce volumen de Chrome/Spotify/VLC y pausa YouTube automáticamente
 - ✅ **Recuperación automática** — detecta fallos de mpv, locks expirados, errores de síntesis
 - ✅ **API local segura** — 127.0.0.1 con autenticación Bearer token
-- ✅ **Panel web** — interfaz de administración en el navegador
+- ✅ **Panel web** — interfaz de administración en el navegador, con pestañas de
+  configuración (volumen/apps · fuentes de voz), control manual del orden de la
+  cola (▲/▼), botón **▶ reproducir ahora** y vista previa del texto con tooltip
+- ✅ **Portapapeles** — lectura automática de lo que copias (fuente `clipboard`),
+  con deduplicación por contenido: copiar lo mismo dos veces no lo repite
 - ✅ **Reversible** — se puede desactivar y volver al plugin original sin pérdida
 
 ## Inicio rápido
@@ -83,11 +87,14 @@ Authorization: Bearer <token>
 | POST | `/api/v1/playback/stop` | Detener |
 | POST | `/api/v1/playback/skip` | Saltar actual |
 | DELETE | `/api/v1/queue/:id` | Cancelar solicitud |
+| POST | `/api/v1/queue/:id/move` | Mover en la cola: `{"direction":"up"\|"down"}` (flechitas ▲/▼ del panel) |
+| POST | `/api/v1/queue/:id/play-now` | Poner al frente de la cola, **detener la locución actual** y reproducir ya (botón ▶ del panel) |
 | GET | `/api/v1/sessions` | Sesiones registradas |
 | POST | `/api/v1/sessions` | Registrar sesión |
 | PUT | `/api/v1/sessions/:id/voice` | Asignar voz |
 | GET/PUT | `/api/v1/config` | Leer/modificar config |
 | GET | `/api/v1/voices` | Voces disponibles |
+| POST | `/api/v1/voices/preview` | Muestra de voz: el texto dice **«Esta es una muestra de la voz <nombre>.»** |
 | POST | `/v1/audio/speech` | OpenAI-compatible (solo genera audio) |
 
 ### Ejemplo de solicitud

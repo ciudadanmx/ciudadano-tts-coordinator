@@ -47,10 +47,16 @@ Para lanzarlo a mano: `scripts/start-clipboard-watcher.ps1`.
   (seleccionable en el panel como cualquier fuente).
 - Copiar otro texto → **reemplaza solo** la lectura anterior del portapapeles
   (`reemplazadas: N` en el log). No toca alertas ni locuciones de otros agentes.
+- **Copiar exactamente lo mismo que la copia anterior NO se vuelve a leer**
+  (no se agrega a la cola). La comparación es por **hash SHA-256** del texto:
+  el contenido no se guarda, solo su huella. La respuesta de la API lo dice:
+  `{"ok":true,"skipped":true,"reason":"duplicate"}`, y el estado lleva
+  `duplicateCount`.
 - Se respetan las prioridades de la cola central (convive con DSH1/DSH2/Dany/Claude).
 - Un mismo evento no se procesa dos veces (se deduplica por el número de
-  secuencia del portapapeles); copiar el **mismo** texto otra vez sí se vuelve a
-  leer (evento nuevo).
+  secuencia del portapapeles). Nota: la deduplicación por *contenido* es
+  distinta de la del evento — copiar el mismo texto en un evento nuevo ya
+  **no** se vuelve a leer (comportamiento pedido explícitamente).
 - Imágenes, archivos y formatos sin texto se ignoran.
 - Textos muy largos se recortan a `clipboard.maxChars` (por defecto **2000**,
   configurable en `config.json`).
@@ -88,6 +94,14 @@ Para lanzarlo a mano: `scripts/start-clipboard-watcher.ps1`.
 - Convivencia: DSH1/DSH2 siguen sonando con normalidad durante las pruebas.
 - El atajo quedó registrado (`hotkeyRegistered:true`); si otra app lo tuviera,
   se reportaría en el panel sin interferir.
+
+## Pruebas del 12/11/2026 (dedup por contenido)
+
+- 1ª copia de un texto → encolado (`HTTP 202`, `queuePosition`).
+- 2ª copia **idéntica** → `HTTP 202 {"ok":true,"skipped":true,"reason":"duplicate"}`
+  y **no** aparece ningún item nuevo en la cola (1 item antes y 1 después).
+- `/api/v1/clipboard/status` → `readCount:1`, `duplicateCount:1`.
+- El texto nunca aparece en logs ni en el estado (solo longitud y hash interno).
 
 ## Trampas encontradas (ver también historia-de-errores.md #22)
 

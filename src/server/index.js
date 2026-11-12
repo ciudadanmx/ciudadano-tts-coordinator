@@ -207,6 +207,14 @@ route('POST', '/api/v1/speech', async (req, res) => {
       logger.info('Texto del portapapeles descartado', { reason: sub.error })
       return sendJson(res, 202, { ok: true, skipped: true, reason: sub.error })
     }
+    // Copiar EXACTAMENTE lo mismo que la copia anterior no vuelve a encolar:
+    // no se repite la lectura. (Solo se compara por hash; el texto no se guarda.)
+    if (sub.duplicate) {
+      logger.info('Lectura del portapapeles omitida: texto idéntico al anterior', {
+        chars: sub.chars,
+      })
+      return sendJson(res, 202, { ok: true, skipped: true, reason: 'duplicate', chars: sub.chars })
+    }
     const replaced = queue.cancelSession('clipboard')
     const request = {
       requestId: body.requestId || randomUUID(),
@@ -411,6 +419,24 @@ route('DELETE', '/api/v1/queue/:requestId', (req, res, params) => {
   sendJson(res, r.ok ? 200 : 404, r)
 })
 
+// Mover una locución en la cola (flechitas ↑/↓ del panel)
+route('POST', '/api/v1/queue/:requestId/move', async (req, res, params) => {
+  const body = await parseJsonBody(req)
+  const direction = String(body.direction || '').toLowerCase()
+  if (direction !== 'up' && direction !== 'down') {
+    return sendJson(res, 400, { ok: false, error: "direction debe ser 'up' o 'down'" })
+  }
+  const r = queue.moveInQueue(params.requestId, direction)
+  sendJson(res, r.ok ? 200 : 404, r)
+})
+
+// Reproducir YA: la locución pasa al frente de la cola, se detiene la que esté
+// sonando (si la hay) y empieza a sonar de inmediato.
+route('POST', '/api/v1/queue/:requestId/play-now', async (req, res, params) => {
+  const r = queue.playNow(params.requestId)
+  sendJson(res, r.ok ? 200 : 404, r)
+})
+
 // Cancelar sesión completa
 route('DELETE', '/api/v1/sessions/:sessionId/queue', (req, res, params) => {
   const r = queue.cancelSession(params.sessionId)
@@ -543,6 +569,23 @@ route('POST', '/api/v1/voices/preview', async (req, res) => {
   const body = await parseJsonBody(req)
   const voice = String(body.voice || '')
   if (!voice) return sendJson(res, 400, { ok: false, error: { code: 'no-voice', message: 'voice requerida' } })
+  // La muestra dice QUÉ voz es: el nombre legible de la voz (no solo el id).
+  // Si el cliente no manda texto, se arma aquí: "Esta es una muestra de la voz X".
+  let texto = String(body.text || '').trim()
+  let nombreVoz = String(body.voiceName || '').trim()
+  if (!nombreVoz) {
+    // Buscar el nombre en el catálogo (id -> nombre legible).
+    try {
+      const cat = await synthesizer.listVoiceCatalog()
+      const hit = (cat || []).find(v => v.id === voice)
+      if (hit && hit.name) nombreVoz = hit.name
+    } catch { /* si no hay catálogo, se usa el id */ }
+  }
+  if (!texto) {
+    texto = nombreVoz
+      ? ('Esta es una muestra de la voz ' + nombreVoz + '.')
+      : ('Esta es una muestra de la voz seleccionada.')
+  }
   const result = queue.enqueue({
     requestId: randomUUID(),
     source: 'preview',
@@ -552,12 +595,12 @@ route('POST', '/api/v1/voices/preview', async (req, res) => {
     sessionTitle: 'Muestra de voz',
     taskTitle: '',
     voice,
-    text: String(body.text || 'Esta es una muestra de la voz seleccionada.'),
+    text: texto,
     priority: 'normal',
     preview: true,
   })
   if (!result.ok) return sendJson(res, 429, { ok: false, error: result.error, requestId: result.requestId })
-  sendJson(res, 202, { ok: true, ...result, voice })
+  sendJson(res, 202, { ok: true, ...result, voice, voiceName: nombreVoz || voice, text: texto })
 })
 
 // --- Fuentes de voz (agentes/servicios) ---
@@ -626,7 +669,22 @@ route('GET', '/', (req, res) => {
   .bar > div { height: 100%; background: #e94560; border-radius: 10px; }
   label { display: inline-block; min-width: 120px; }
   input[type=range] { width: 200px; }
-  .queue-item { padding: 4px 8px; margin: 2px 0; background: #0f3460; border-radius: 4px; font-size: 0.9em; }
+  .queue-item { padding: 6px 8px; margin: 3px 0; background: #0f3460; border-radius: 4px; font-size: 0.9em; }
+  .qbtn { display:inline-block; cursor:pointer; user-select:none; padding:0 4px; border-radius:4px;
+          background:#1b4b7a; color:#fff; font-size:13px; line-height:18px; }
+  .qbtn:hover { background:#e94560; }
+  .qbtn.qplay { background:#2e7d32; }
+  .qbtn.qplay:hover { background:#43a047; }
+  .qbtn.qoff { opacity:.3; cursor:default; }
+  .qbtn.qoff:hover { background:#1b4b7a; }
+  .qpos { color:#8fa3c8; font-size:11px; }
+  .qtext { font-size:11px; color:#b8c6e0; margin-top:3px; max-width:100%; overflow:hidden;
+           text-overflow:ellipsis; white-space:nowrap; }
+  .cfg-tabs { display:flex; gap:6px; margin-bottom:10px; border-bottom:1px solid #333; padding-bottom:8px; }
+  .cfg-tabs button { margin:0; padding:6px 12px; font-size:13px; }
+  .cfg-tabs button.on { background:#e94560; }
+  .cfg-pane { display:none; }
+  .cfg-pane.on { display:block; }
   #cfgOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 10; }
   #cfgPanel { background: #16213e; border-radius: 10px; max-width: 660px; margin: 50px auto; padding: 20px; max-height: 82vh; overflow: auto; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
   .cfg-app { border-bottom: 1px solid #333; padding: 8px 0; }
@@ -649,11 +707,6 @@ route('GET', '/', (req, res) => {
   <button onclick="prevReplay()">⏮ ANTERIOR</button>
   <button onclick="ctrl('skip')">⏭ SIGUIENTE</button>
   <button class="secondary" onclick="openCfg()" title="Configurar volumen y acciones">⚙️</button>
-</div>
-<div class="card">
-  <h3>🎙️ Fuentes de voz</h3>
-  <p style="font-size:11px;color:#888;margin:0 0 6px">Desmarca una fuente para silenciar sus locuciones (no afecta al agente ni a las demás fuentes). La voz elegida aquí prevalece sobre los valores por defecto.</p>
-  <table id="sources"><tr><th>Activa</th><th>Fuente</th><th>Estado</th><th>Voz</th><th></th></tr></table>
 </div>
 <div class="card">
   <h3>📋 Portapapeles de Windows</h3>
@@ -702,11 +755,21 @@ route('GET', '/', (req, res) => {
 </div>
 <div id="cfgOverlay" onclick="if(event.target===this)closeCfg()">
   <div id="cfgPanel">
-    <h3 style="margin-top:0">⚙️ Volumen y acciones por aplicación</h3>
-    <div style="font-size:11px;color:#888;margin-bottom:8px">Ajusta todo y pulsa <b>💾 Guardar</b>: se aplica de inmediato y esta ventana se cierra sola. Este modal NO se refresca solo.</div>
-    <div id="cfgBody"></div>
-    <hr style="border-color:#333">
-    <label>Volumen del coordinador (mpv, 0–600): <input type="range" id="ttsVol" min="0" max="600" value="100" oninput="document.getElementById('ttsVal').textContent=this.value"> <span id="ttsVal">100</span>%</label>
+    <h3 style="margin-top:0">⚙️ Configuración</h3>
+    <div class="cfg-tabs">
+      <button id="cfgTabApps" onclick="cfgTab('apps')">🔊 Volumen y apps</button>
+      <button id="cfgTabSources" onclick="cfgTab('sources')">🎙️ Fuentes de voz</button>
+    </div>
+    <div class="cfg-pane" id="cfgPaneApps">
+      <div style="font-size:11px;color:#888;margin-bottom:8px">Ajusta todo y pulsa <b>💾 Guardar</b>: se aplica de inmediato y esta ventana se cierra sola. Este modal NO se refresca solo.</div>
+      <div id="cfgBody"></div>
+      <hr style="border-color:#333">
+      <label>Volumen del coordinador (mpv, 0–600): <input type="range" id="ttsVol" min="0" max="600" value="100" oninput="document.getElementById('ttsVal').textContent=this.value"> <span id="ttsVal">100</span>%</label>
+    </div>
+    <div class="cfg-pane" id="cfgPaneSources">
+      <div style="font-size:11px;color:#888;margin-bottom:8px">Desmarca una fuente para silenciar sus locuciones (no afecta al agente ni a las demás fuentes). La voz elegida aquí prevalece sobre los valores por defecto.</div>
+      <table id="sources"><tr><th>Activa</th><th>Fuente</th><th>Estado</th><th>Voz</th><th></th></tr></table>
+    </div>
     <div style="margin-top:8px">
       <button id="cfgSave" onclick="saveAll()">💾 Guardar</button>
       <button class="secondary" onclick="forceRestore()">↩ Restaurar audio ahora</button>
@@ -757,7 +820,22 @@ async function refresh() {
   try {
     const q = await api('/api/v1/queue');
     document.getElementById('queue').innerHTML = (q.items||[]).filter(i=>['queued','synthesizing','ready','playing'].includes(i.status))
-      .map(i => '<div class="queue-item">[' + i.status + '] ' + esc(i.source) + ' — ' + esc(i.sessionName || i.sessionTitle || i.sessionId) + ' (' + esc(i.voice) + ')</div>').join('') || '<i>vacía</i>';
+      .map((i, idx, arr) => {
+        const texto = i.text || i.textPreview || '';
+        const corto = texto.length > 90 ? texto.slice(0,90) + '…' : texto;
+        const up = idx > 0 ? '' : ' qoff';
+        const down = idx < arr.length - 1 ? '' : ' qoff';
+        const play = (i.status === 'playing') ? '' :
+          '<span class="qbtn qplay" title="Reproducir AHORA: pasa al frente de la cola, detiene la locución actual y suena de inmediato" data-q="' + esc(i.requestId) + '" onclick="playNow(this)">▶</span> ';
+        return '<div class="queue-item">' +
+          '<span class="qbtn' + up + '" title="Subir en la cola" data-q="' + esc(i.requestId) + '" data-dir="up" onclick="moveQueue(this)">▲</span> ' +
+          '<span class="qbtn' + down + '" title="Bajar en la cola" data-q="' + esc(i.requestId) + '" data-dir="down" onclick="moveQueue(this)">▼</span> ' +
+          play +
+          '<span class="qpos">' + (idx + 1) + '.</span> ' +
+          '[' + esc(i.status) + '] ' + esc(i.source) + ' — ' + esc(i.sessionName || i.sessionTitle || i.sessionId) + ' (' + esc(i.voice) + ')' +
+          '<div class="qtext" title="' + esc(texto) + '">' + esc(corto) + '</div>' +
+          '</div>';
+      }).join('') || '<i>vacía</i>';
   } catch (e) { console.warn('queue falló', e); }
   try {
     const sess = await api('/api/v1/sessions');
@@ -846,9 +924,29 @@ async function refreshMultimedia() {
 }
 var __cfgOpen = false;
 var __cfgApps = [];
-async function openCfg(focusApp) {
+var __cfgTab = 'apps';
+// Cambiar de pestaña NO reconstruye el DOM: solo cambia qué panel se ve.
+// Así el modal no se "traba" ni se pierde lo que el usuario esté adjusting.
+function cfgTab(which) {
+  __cfgTab = (which === 'sources') ? 'sources' : 'apps';
+  const apps = document.getElementById('cfgPaneApps');
+  const srcs = document.getElementById('cfgPaneSources');
+  if (apps) apps.classList.toggle('on', __cfgTab === 'apps');
+  if (srcs) srcs.classList.toggle('on', __cfgTab === 'sources');
+  const b1 = document.getElementById('cfgTabApps');
+  const b2 = document.getElementById('cfgTabSources');
+  if (b1) b1.classList.toggle('on', __cfgTab === 'apps');
+  if (b2) b2.classList.toggle('on', __cfgTab === 'sources');
+  // En "Fuentes de voz" los cambios se aplican al instante: no hay nada que guardar.
+  const save = document.getElementById('cfgSave');
+  if (save) save.style.display = (__cfgTab === 'apps') ? '' : 'none';
+  // Las fuentes se piden al abrir la pestaña (no antes): menos trabajo al abrir.
+  if (__cfgTab === 'sources') refreshSources();
+}
+async function openCfg(focusApp, tab) {
   __cfgOpen = true;
   document.getElementById('cfgOverlay').style.display = 'block';
+  cfgTab(tab || __cfgTab || 'apps');
   try {
     const m = await api('/api/v1/multimedia/status');
     const rows = [];
@@ -876,6 +974,8 @@ async function openCfg(focusApp) {
     }
     if (focusApp) { const el = document.getElementById('cfgmode-' + focusApp); if (el) el.focus(); }
   } catch (e) { console.warn('openCfg falló', e); }
+  // Las fuentes se actualizan al abrir el modal (tab de fuentes): la tabla queda al día.
+  try { __sourcesSig = ''; await refreshSources(); } catch (e) { /* noop */ }
 }
 function closeCfg() { __cfgOpen = false; document.getElementById('cfgOverlay').style.display = 'none'; }
 // "Subir al 100": pone al 100 el volumen de esa app y deja ese 100 como
@@ -894,6 +994,30 @@ async function vol100(appKey) {
 }
 async function forceRestore() { await api('/api/v1/multimedia/restore', { method: 'POST' }); refresh(); }
 async function ctrl(action) { await api('/api/v1/playback/' + action, { method: 'POST' }); refresh(); }
+// --- Cola: mover con flechitas y "reproducir ya" ---
+async function moveQueue(el) {
+  const id = el && el.dataset ? el.dataset.q : '';
+  const dir = el && el.dataset ? el.dataset.dir : '';
+  if (!id || !dir) return;
+  try {
+    const r = await api('/api/v1/queue/' + encodeURIComponent(id) + '/move', {
+      method: 'POST', body: JSON.stringify({ direction: dir })
+    });
+    if (r && r.ok === false) flash('⚠️ ' + (r.error || 'no se pudo mover'));
+    else flash((dir === 'up' ? '▲ movida arriba' : '▼ movida abajo') + ' (posición ' + (r.position ?? '?') + ')');
+  } catch (e) { flash('❌ ' + e.message) }
+  await refresh();
+}
+async function playNow(el) {
+  const id = el && el.dataset ? el.dataset.q : '';
+  if (!id) return;
+  try {
+    const r = await api('/api/v1/queue/' + encodeURIComponent(id) + '/play-now', { method: 'POST' });
+    if (r && r.ok === false) flash('⚠️ ' + (r.error || 'no se pudo reproducir'));
+    else flash('▶ reproduciendo AHORA' + (r.stopped ? ' (se detuvo la locución anterior)' : ''));
+  } catch (e) { flash('❌ ' + e.message) }
+  await refresh();
+}
 async function togglePause() {
   const s = await api('/api/v1/status');
   if (s.paused) await api('/api/v1/playback/resume', { method: 'POST' });
@@ -1160,9 +1284,18 @@ async function pickVoice(el) {
 }
 async function previewVoice(el) {
   const voice = (el && el.dataset ? el.dataset.v : el) || '';
-  const r = await api('/api/v1/voices/preview', { method: 'POST', body: JSON.stringify({ voice: voice }) });
-  if (r && r.ok === false) flash('❌ ' + ((r.error && r.error.message) || 'no se pudo encolar la muestra'));
-  else flash('🔊 Muestra en cola: ' + voice);
+  // Nombre legible de la voz (no el id): la muestra lo dice en voz alta.
+  let nombre = '';
+  try {
+    const hit = (__voiceCatalog || []).find(v => v.id === voice);
+    if (hit && hit.name) nombre = hit.name;
+  } catch (e) { /* sin catálogo: el backend busca el nombre */ }
+  const texto = nombre ? ('Esta es una muestra de la voz ' + nombre + '.') : '';
+  const r = await api('/api/v1/voices/preview', {
+    method: 'POST', body: JSON.stringify({ voice: voice, voiceName: nombre, text: texto })
+  });
+  if (r && r.ok === false) flash('❌ ' + ((r.error && r.error.message) || r.error || 'no se pudo encolar la muestra'));
+  else flash('🔊 Muestra en cola: ' + (r.voiceName || nombre || voice));
 }
 function closeVoicePicker() { document.getElementById('voiceOverlay').style.display = 'none'; }
 setInterval(refresh, 2000);

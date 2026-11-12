@@ -69,6 +69,7 @@ export class UtteranceQueue extends EventEmitter {
     this.items = new Map() // requestId -> utterance
     this.order = [] // requestIds en orden de llegada
     this.playing = null // requestId actualmente reproduciéndose
+    this.frontId = null // item marcado como "reproducir ya" (botón ▶ del panel)
     this._lastServedSource = null // última fuente servida (fairness round-robin)
     // Pre-síntesis en paralelo: Edge TTS tarda 30-40 s por fragmento (a veces
     // se cuelga), así que sintetizar de uno en uno deja la cola con una hora
@@ -323,6 +324,13 @@ export class UtteranceQueue extends EventEmitter {
 
   // --- Obtener siguiente pendiente ---
   _next() {
+    // Item marcado como "reproducir ya" (botón ▶ del panel): gana al resto,
+    // incluido el round-robin entre fuentes. Se limpia cuando ya no está pendiente.
+    if (this.frontId) {
+      const f = this.items.get(this.frontId)
+      if (f && f.status === 'queued' && (!f.notBefore || f.notBefore <= Date.now())) return f
+      if (!f || ['done', 'error', 'cancelled'].includes(f.status)) this.frontId = null
+    }
     // FAIRNESS entre fuentes (round-robin): sin esto, una fuente que genera
     // locuciones sin parar (p.ej. dsh2) MONOPOLIZA la cola y las demás
     // (dsh1, dany, claude) quedan enterradas: el usuario sólo oía una voz
@@ -571,6 +579,8 @@ export class UtteranceQueue extends EventEmitter {
 
       // 4. Reproducción con lock (volumen: mpv ya arranca con --volume=config.player.volume; no pisar por utterance)
       this.playing = utterance.requestId
+      // Si este item estaba marcado como "reproducir ya", ya se sirvió: limpiar.
+      if (this.frontId === utterance.requestId) this.frontId = null
       // Fairness: se recuerda la fuente servida para que la siguiente elija
       // otra fuente si hay alguna esperando (round-robin entre agentes).
       this._lastServedSource = utterance.source || '?'
@@ -874,6 +884,106 @@ export class UtteranceQueue extends EventEmitter {
     return { ok: true, cancelled: count }
   }
 
+  // IDs de los items que el panel MUESTRA (pendientes o sonando), en orden.
+  _visibleIds() {
+    return this.order.filter(id => {
+      const u = this.items.get(id)
+      return u && ['queued', 'synthesizing', 'ready', 'playing'].includes(u.status)
+    })
+  }
+
+  // Posición VISIBLE del item (solo los que el panel muestra: pendientes/sonando).
+  _visiblePosition(id) {
+    let pos = 0
+    for (const rid of this._visibleIds()) {
+      pos++
+      if (rid === id) return pos
+    }
+    return 0
+  }
+
+  // --- Reordenar la cola a mano (flechitas ↑/↓ del panel) ---
+  // Mueve un item una posición dentro del orden visible y reasigna los `seq`
+  // para que el orden manual también se respete al servir (la cola ordena por
+  // prioridad, luego seq). Los fragmentos de una intervención conservan su
+  // orden relativo porque el array `order` ya los tenía en orden.
+  moveInQueue(requestId, direction) {
+    const u = this.items.get(requestId)
+    if (!u) return { ok: false, error: 'no encontrado' }
+    if (u.status !== 'queued') return { ok: false, error: 'ya no está pendiente' }
+    // El movimiento es dentro de la lista VISIBLE (lo que el panel muestra):
+    // el array interno `order` también guarda lo ya reproducido, y moverse ahí
+    // no se notaría en pantalla.
+    const visibles = this._visibleIds()
+    const vi = visibles.indexOf(requestId)
+    if (vi === -1) return { ok: false, error: 'no está en la cola' }
+    const vj = direction === 'up' ? vi - 1 : direction === 'down' ? vi + 1 : -1
+    if (vj < 0) return { ok: false, error: 'ya está al principio' }
+    if (vj >= visibles.length) return { ok: false, error: 'ya está al final' }
+    // Intercambiar las posiciones reales dentro de `order`.
+    const ia = this.order.indexOf(requestId)
+    const ib = this.order.indexOf(visibles[vj])
+    this.order[ia] = visibles[vj]
+    this.order[ib] = requestId
+    this._resequence()
+    const pos = this._visiblePosition(requestId)
+    logger.info('Locución movida en la cola', { requestId, direction, position: pos })
+    return { ok: true, requestId, direction, position: pos }
+  }
+
+  // Reasigna seq según el orden visible de la cola.
+  _resequence() {
+    let seq = 0
+    for (const id of this.order) {
+      const u = this.items.get(id)
+      if (!u) continue
+      if (u.status === 'queued') { u.seq = seq; seq++ }
+    }
+  }
+
+  // --- Reproducir YA: al frente de la cola, deteniendo la locución en curso ---
+  playNow(requestId) {
+    const u = this.items.get(requestId)
+    if (!u) return { ok: false, error: 'no encontrado' }
+    if (this.playing === requestId) return { ok: true, alreadyPlaying: true, requestId }
+    if (u.status !== 'queued') return { ok: false, error: 'no está pendiente' }
+    // 1) al frente de la lista VISIBLE (lo primero que se ve en el panel)
+    const visibles = this._visibleIds()
+    const primero = visibles.find(vid => vid !== requestId)
+    if (primero) {
+      const ia = this.order.indexOf(requestId)
+      if (ia !== -1) this.order.splice(ia, 1)
+      const ib = this.order.indexOf(primero)
+      this.order.splice(ib === -1 ? 0 : ib, 0, requestId)
+    }
+    this._resequence()
+    // 2) marcarlo para que _next() lo sirva primero (gana al round-robin)
+    this.frontId = requestId
+    // 2b) Si aún no está sintetizado, lanzar SU síntesis ahora mismo (no esperar
+    //     al turno normal del pre-synth): así el botón ▶ suena lo antes posible.
+    if (u.synthStatus !== 'ready' && !this._preSynth.has(requestId)) {
+      try {
+        const fullText = this._fullText(u)
+        const entry = { done: false, result: null }
+        entry.promise = Promise.resolve()
+          .then(() => this.deps.synthesize(fullText, { voice: u.voice, requestId }))
+          .then(r => { entry.done = true; entry.result = r; return r })
+          .catch(e => { entry.done = true; entry.result = { error: e.message }; return entry.result })
+        this._preSynth.set(requestId, entry)
+        logger.info('Síntesis inmediata para la locución prioritaria', { requestId })
+      } catch (e) { /* si falla, se sintetiza en el turno normal */ }
+    }
+    // 3) detener lo que esté sonando ahora mismo
+    let stopped = null
+    if (this.playing) {
+      stopped = this.stopCurrent()
+    }
+    logger.info('Locución enviada al frente de la cola', { requestId, stopped: !!stopped?.ok })
+    // 4) arrancar
+    this._pump()
+    return { ok: true, requestId, stopped: !!stopped?.ok, position: this._visiblePosition(requestId) }
+  }
+
   // --- Detener reproducción actual ---
   stopCurrent() {
     if (this.playing) {
@@ -949,6 +1059,7 @@ export class UtteranceQueue extends EventEmitter {
         totalFragments: u.totalFragments,
         createdAt: u.createdAt,
         error: u.error,
+        text: String(u.text || ''),
         textPreview: String(u.text || '').slice(0, 120),
         textLength: (u.text || '').length,
       }))

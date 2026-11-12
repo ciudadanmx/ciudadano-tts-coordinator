@@ -15,6 +15,7 @@
 //   - Las locuciones del portapapeles son EFÍMERAS: no van al historial.
 //   - El contenido solo viaja al sintetizador TTS configurado.
 
+import { createHash } from 'node:crypto'
 import { logger } from '../monitoring/logger.js'
 
 const DEFAULT_MAX_CHARS = 2000
@@ -41,7 +42,9 @@ export class ClipboardService {
     }
     this.lastTextAt = null
     this.lastTextLength = 0
+    this.lastTextHash = null
     this.readCount = 0
+    this.duplicateCount = 0
   }
 
   get hotkey() {
@@ -73,6 +76,7 @@ export class ClipboardService {
       lastTextAt: this.lastTextAt,
       lastTextLength: this.lastTextLength,
       readCount: this.readCount,
+      duplicateCount: this.duplicateCount,
     }
   }
 
@@ -117,7 +121,11 @@ export class ClipboardService {
    * Texto copiado. Se valida y se encola como locución efímera de la fuente
    * 'clipboard'. NO se registra el contenido: solo la longitud.
    *
-   * @returns {{ok:boolean, error?:string, requestId?:string, chars?:number}}
+   * Si el texto es IDÉNTICO al de la copia anterior no se vuelve a encolar
+   * (se guarda solo su hash SHA-256, nunca el texto). Copiar lo mismo otra
+   * vez no repite la lectura.
+   *
+   * @returns {{ok:boolean, error?:string, requestId?:string, chars?:number, duplicate?:boolean}}
    */
   submitText(text) {
     if (!this.isEnabled()) return { ok: false, error: 'captura desactivada' }
@@ -126,6 +134,17 @@ export class ClipboardService {
     if (!trimmed) return { ok: false, error: 'texto vacío' }
     const max = this.maxChars
     const clipped = trimmed.length > max ? trimmed.slice(0, max) : trimmed
+    // Hash del contenido para detectar copias idénticas. NUNCA se guarda el texto.
+    const hash = createHash('sha256').update(clipped).digest('hex')
+    if (hash === this.lastTextHash) {
+      // Mismo texto que la copia anterior: no se agrega a la cola.
+      this.duplicateCount++
+      logger.info('Texto del portapapeles idéntico al anterior: se omite', {
+        chars: clipped.length,
+      })
+      return { ok: true, duplicate: true, chars: clipped.length, text: clipped }
+    }
+    this.lastTextHash = hash
     // SIN contenido en el log: solo longitud y si fue recortado.
     logger.info('Texto del portapapeles recibido', {
       chars: clipped.length, recortado: clipped.length < trimmed.length,
