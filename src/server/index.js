@@ -3,6 +3,7 @@
 // reproductor mpv, síntesis edge-tts, y control multimedia.
 
 import { createServer } from 'node:http'
+import { readFile as readTtsFavicon } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { loadConfig, saveConfig, getConfig } from '../configuration/store.js'
 import { logger } from '../monitoring/logger.js'
@@ -665,21 +666,22 @@ route('GET', '/', (req, res) => {
 <head>
 <meta charset="utf-8">
 <title>Ciudadan TTS Coordinator</title>
+  <link rel="icon" type="image/x-icon" href="/ciudadan-tts-c-roja.ico">
 <style>
-  body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; max-width: 900px; margin: 0 auto; padding: 20px; }
+  body { font-family: system-ui, sans-serif; background: #150f23; color: #eee; max-width: 900px; margin: 0 auto; padding: 20px; }
   h1 { color: #e94560; }
-  .card { background: #16213e; border-radius: 8px; padding: 16px; margin: 12px 0; }
+  .card { background: #241536; border-radius: 8px; padding: 16px; margin: 12px 0; }
   .status-repro { color: #0f0; } .status-idle { color: #888; } .status-paused { color: #ffb300; }
   button { background: #e94560; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin: 4px; }
   button:hover { background: #ff6b6b; }
-  button.secondary { background: #0f3460; }
+  button.secondary { background: #3a2366; }
   table { width: 100%; border-collapse: collapse; }
   td, th { padding: 6px 10px; text-align: left; border-bottom: 1px solid #333; }
-  .bar { height: 20px; background: #0f3460; border-radius: 10px; position: relative; margin: 4px 0; }
+  .bar { height: 20px; background: #3a2366; border-radius: 10px; position: relative; margin: 4px 0; }
   .bar > div { height: 100%; background: #e94560; border-radius: 10px; }
   label { display: inline-block; min-width: 120px; }
   input[type=range] { width: 200px; }
-  .queue-item { padding: 6px 8px; margin: 3px 0; background: #0f3460; border-radius: 4px; font-size: 0.9em; }
+  .queue-item { padding: 6px 8px; margin: 3px 0; background: #3a2366; border-radius: 4px; font-size: 0.9em; }
   .qbtn { display:inline-block; cursor:pointer; user-select:none; padding:0 4px; border-radius:4px;
           background:#1b4b7a; color:#fff; font-size:13px; line-height:18px; }
   .qbtn:hover { background:#e94560; }
@@ -696,12 +698,12 @@ route('GET', '/', (req, res) => {
   .cfg-pane { display:none; }
   .cfg-pane.on { display:block; }
   #cfgOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 10; }
-  #cfgPanel { background: #16213e; border-radius: 10px; max-width: 660px; margin: 50px auto; padding: 20px; max-height: 82vh; overflow: auto; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
+  #cfgPanel { background: #241536; border-radius: 10px; max-width: 660px; margin: 50px auto; padding: 20px; max-height: 82vh; overflow: auto; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
   .cfg-app { border-bottom: 1px solid #333; padding: 8px 0; }
   .cfg-app label { min-width: 0; margin-right: 10px; }
   #voiceOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 12; }
-  #voicePanel { background: #16213e; border-radius: 10px; max-width: 720px; margin: 40px auto; padding: 20px; max-height: 86vh; overflow: auto; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
-  #voiceList > div:hover { background: #0f3460; }
+  #voicePanel { background: #241536; border-radius: 10px; max-width: 720px; margin: 40px auto; padding: 20px; max-height: 86vh; overflow: auto; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
+  #voiceList > div:hover { background: #3a2366; }
   .src-chip { font-size: 10px; color: #888; }
 </style>
 </head>
@@ -745,40 +747,32 @@ route('GET', '/', (req, res) => {
   <p style="font-size:11px;color:#888">El audio NO se guarda — solo el texto en memoria. ▶ = reproducir AHORA (pausa la cola y la reanuda al terminar). ➕ = agregar de nuevo al final de la cola.</p>
   <table id="history"><tr><th>Hora</th><th>Agente</th><th>Sesión</th><th>Voz</th><th>Estado</th><th>Dur.</th><th>Texto</th><th>Replay</th></tr></table>
 </div>
-<div class="card">
-  <h3>Agentes registrados</h3>
-  <table id="sessions"><tr><th>Fuente</th><th>Sesión</th><th>Voz</th></tr></table>
-</div>
-<div class="card">
-  <h3>🎛️ Ducking por aplicación <small>(persistente)</small></h3>
-  <div id="mmStatus" style="font-size:12px;color:#888;margin-bottom:6px"></div>
-  <div id="mmWarn" style="display:none;margin-bottom:6px"></div>
-  <table id="mmApps"><tr><th>Aplicación</th><th>Modo</th><th>% reducción</th><th>Volumen actual</th><th>Estado ducking</th><th></th></tr></table>
-  <div style="font-size:11px;color:#888;margin-top:6px">
-    Modos: <b>Pausar</b> (solo apps con pausa selectiva, ej. YouTube), <b>Reducir</b> (0-100% respecto al volumen original de la app), <b>Ignorar</b>.<br>
-    No se toca el volumen maestro de Windows ni la voz del coordinador (mpv). Los cambios manuales tuyos se respetan al restaurar.
-  </div>
-  <div style="margin-top:8px">
-    Volumen TTS (mpv): <b id="ttsVolNow">—</b>%
-    <span style="font-size:11px;color:#888">(cambia con ⚙️ en la barra de controles)</span>
-  </div>
-</div>
 <div id="cfgOverlay" onclick="if(event.target===this)closeCfg()">
   <div id="cfgPanel">
     <h3 style="margin-top:0">⚙️ Configuración</h3>
     <div class="cfg-tabs">
-      <button id="cfgTabApps" onclick="cfgTab('apps')">🔊 Volumen y apps</button>
-      <button id="cfgTabSources" onclick="cfgTab('sources')">🎙️ Fuentes de voz</button>
+      <button id="cfgTabApps" onclick="cfgTab('apps')">🧩 Apps</button>
+      <button id="cfgTabSources" onclick="cfgTab('sources')">🎙️ Fuentes</button>
     </div>
     <div class="cfg-pane" id="cfgPaneApps">
+      <div style="font-size:11px;color:#b9a8d8;margin-bottom:8px">Acciones por aplicación (pausar / reducir / ignorar) con su estado actual.</div>
+      <div id="mmStatus" style="font-size:12px;color:#b9a8d8;margin-bottom:6px"></div>
+      <div id="mmWarn" style="display:none;margin-bottom:6px"></div>
+      <div style="margin-top:8px">
+        Volumen TTS (mpv): <b id="ttsVolNow">—</b>%
+        <span style="font-size:11px;color:#888">(cambia con ⚙️ en la barra de controles)</span>
+      </div>
+      <hr style="border-color:#333">
       <div style="font-size:11px;color:#888;margin-bottom:8px">Ajusta todo y pulsa <b>💾 Guardar</b>: se aplica de inmediato y esta ventana se cierra sola. Este modal NO se refresca solo.</div>
       <div id="cfgBody"></div>
-      <hr style="border-color:#333">
       <label>Volumen del coordinador (mpv, 0–600): <input type="range" id="ttsVol" min="0" max="600" value="100" oninput="document.getElementById('ttsVal').textContent=this.value"> <span id="ttsVal">100</span>%</label>
     </div>
     <div class="cfg-pane" id="cfgPaneSources">
       <div style="font-size:11px;color:#888;margin-bottom:8px">Desmarca una fuente para silenciar sus locuciones (no afecta al agente ni a las demás fuentes). La voz elegida aquí prevalece sobre los valores por defecto.</div>
       <table id="sources"><tr><th>Activa</th><th>Fuente</th><th>Estado</th><th>Voz</th><th></th></tr></table>
+      <h4 style="margin:12px 0 4px">Agentes registrados</h4>
+      <div style="font-size:11px;color:#888;margin-bottom:6px">Arriba de cola/historial queda sólo la voz TTS activa.</div>
+      <table id="cfgSessions"><tr><th>Fuente</th><th>Sesión</th><th>Voz</th></tr></table>
     </div>
     <div style="margin-top:8px">
       <button id="cfgSave" onclick="saveAll()">💾 Guardar</button>
@@ -796,7 +790,7 @@ route('GET', '/', (req, res) => {
       <button class="secondary" id="tabMale" onclick="setVoiceCategory('male')">👨 Masculinas</button>
       <span class="src-chip" id="voiceCount" style="margin-left:8px"></span>
     </div>
-    <input id="voiceSearch" placeholder="Buscar por nombre, país o identificador (ej. Dalia, es-MX, Salome)" oninput="renderVoiceList()" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:8px;background:#0f3460;color:#eee;border:1px solid #333;border-radius:4px">
+    <input id="voiceSearch" placeholder="Buscar por nombre, país o identificador (ej. Dalia, es-MX, Salome)" oninput="renderVoiceList()" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:8px;background:#3a2366;color:#eee;border:1px solid #333;border-radius:4px">
     <div id="voiceList"></div>
     <div style="margin-top:10px;text-align:right"><button class="secondary" onclick="closeVoicePicker()">✖ Cerrar</button></div>
   </div>
@@ -847,11 +841,9 @@ async function refresh() {
           '</div>';
       }).join('') || '<i>vacía</i>';
   } catch (e) { console.warn('queue falló', e); }
-  try {
-    const sess = await api('/api/v1/sessions');
-    document.getElementById('sessions').innerHTML = '<tr><th>Fuente</th><th>Sesión</th><th>Voz</th></tr>' +
-      (sess.sessions||[]).map(s => '<tr><td>'+esc(s.source)+'</td><td>'+esc(s.displayName || s.title || s.displayTitle || s.sessionId)+'</td><td>'+esc(s.voice)+'</td></tr>').join('');
-  } catch (e) { console.warn('sessions falló', e); }
+  // Agentes registrados (fuentes de voz de agentes) ahora viven en
+  // Configuración → Agentes; arriba de cola/historial queda sólo la voz TTS
+  // activa en el bloque ESTADO.
   try {
     const h = await api('/api/v1/history?limit=30');
     window.__hist = h.items || [];
@@ -923,7 +915,8 @@ async function refreshMultimedia() {
       '<td><button class="secondary" data-app="' + esc(a.appKey) + '" onclick="openCfg(this.dataset.app)">⚙️</button></td>' +
       '</tr>');
   }
-  document.getElementById('mmApps').innerHTML = rows.join('');
+  const mmApps = document.getElementById('mmApps');
+  if (mmApps) mmApps.innerHTML = rows.join('');
   // Volumen TTS como texto read-only (el slider editable está en el modal)
   if (!__cfgOpen) {
     try {
@@ -938,20 +931,30 @@ var __cfgTab = 'apps';
 // Cambiar de pestaña NO reconstruye el DOM: solo cambia qué panel se ve.
 // Así el modal no se "traba" ni se pierde lo que el usuario esté adjusting.
 function cfgTab(which) {
-  __cfgTab = (which === 'sources') ? 'sources' : 'apps';
-  const apps = document.getElementById('cfgPaneApps');
-  const srcs = document.getElementById('cfgPaneSources');
-  if (apps) apps.classList.toggle('on', __cfgTab === 'apps');
-  if (srcs) srcs.classList.toggle('on', __cfgTab === 'sources');
-  const b1 = document.getElementById('cfgTabApps');
-  const b2 = document.getElementById('cfgTabSources');
-  if (b1) b1.classList.toggle('on', __cfgTab === 'apps');
-  if (b2) b2.classList.toggle('on', __cfgTab === 'sources');
-  // En "Fuentes de voz" los cambios se aplican al instante: no hay nada que guardar.
+  __cfgTab = ['apps', 'sources'].includes(which) ? which : 'apps';
+  for (const id of ['cfgPaneApps', 'cfgPaneSources']) {
+    const el = document.getElementById(id);
+    const tab = id.replace('cfgPane', '').toLowerCase();
+    if (el) el.classList.toggle('on', __cfgTab === tab);
+  }
+  for (const id of ['cfgTabApps', 'cfgTabSources']) {
+    const el = document.getElementById(id);
+    const tab = id.replace('cfgTab', '').toLowerCase();
+    if (el) el.classList.toggle('on', __cfgTab === tab);
+  }
+  // En "Fuentes" los cambios se aplican al instante: no hay nada que guardar.
   const save = document.getElementById('cfgSave');
   if (save) save.style.display = (__cfgTab === 'apps') ? '' : 'none';
-  // Las fuentes se piden al abrir la pestaña (no antes): menos trabajo al abrir.
-  if (__cfgTab === 'sources') refreshSources();
+  // Fuentes y agentes se piden al abrir la pestaña (no antes): menos trabajo al abrir.
+  if (__cfgTab === 'sources') { refreshSources(); refreshCfgSessions(); }
+}
+async function refreshCfgSessions() {
+  try {
+    const sess = await api('/api/v1/sessions');
+    const el = document.getElementById('cfgSessions');
+    if (el) el.innerHTML = '<tr><th>Fuente</th><th>Sesión</th><th>Voz</th></tr>' +
+      (sess.sessions || []).map(s => '<tr><td>' + esc(s.source) + '</td><td>' + esc(s.displayName || s.title || s.displayTitle || s.sessionId) + '</td><td>' + esc(s.voice) + '</td></tr>').join('');
+  } catch (e) { console.warn('cfgSessions falló', e); }
 }
 async function openCfg(focusApp, tab) {
   __cfgOpen = true;
@@ -963,10 +966,17 @@ async function openCfg(focusApp, tab) {
     __cfgApps = [];
     for (const a of (m.apps||[])) {
       __cfgApps.push(a.appKey);
+      const vols = (a.detectedSessions || []).map(s => s.process + '(' + s.pid + '): ' + s.volume + '%').join(', ') || 'sin sesiones activas';
+      let duck = '—';
+      if (a.ducking?.active) {
+        if (a.mode === 'reduce') duck = 'ducking ' + a.ducking.duckedCount + ' sesión(es)';
+        else duck = 'pausado ' + ((a.ducking.pausedTabs || 0) + (a.ducking.pausedMedia || 0)) + (a.ducking.pauseMethod === 'gsmtc' ? ' (GSMTC)' : ' (CDP)');
+      }
       rows.push('<div class="cfg-app">' +
         '<b>' + esc(a.label || a.appKey) + '</b>' +
-        (a.appKey === 'navegador' ? ' <span style="color:#888;font-size:11px">(YouTube y Chrome son el mismo proceso de audio: un solo control)</span>' : '') +
-        (a.mode==='pause' && !a.pauseSupported ? ' <span style="color:#ffb300">⚠️ no admite pausa selectiva</span>' : '') + '<br>' +
+        (a.appKey === 'navegador' ? ' <span style="color:#b9a8d8;font-size:11px">(YouTube y Chrome son el mismo proceso de audio: un solo control)</span>' : '') +
+        (a.mode==='pause' && !a.pauseSupported ? ' <span style="color:#ffb300">⚠️ no admite pausa selectiva</span>' : '') +
+        '<div style="font-size:11px;color:#b9a8d8;margin:2px 0 6px">volumen: ' + esc(vols) + ' · estado: ' + esc(duck) + (a.ducking?.stub ? ' (stub)' : '') + '</div>' +
         '<label>Modo: <select id="cfgmode-' + esc(a.appKey) + '">' +
           '<option value="pause"' + (a.mode==='pause'?' selected':'') + '>Pausar (reanuda al terminar)</option>' +
           '<option value="reduce"' + (a.mode==='reduce'?' selected':'') + '>Reducir</option>' +
@@ -1250,8 +1260,8 @@ async function openVoicePicker(el) {
 function setVoiceCategory(cat) {
   __voiceCategory = cat;
   const f = document.getElementById('tabFemale'), m = document.getElementById('tabMale');
-  if (f) f.style.background = cat === 'female' ? '#e94560' : '#0f3460';
-  if (m) m.style.background = cat === 'male' ? '#e94560' : '#0f3460';
+  if (f) f.style.background = cat === 'female' ? '#e94560' : '#3a2366';
+  if (m) m.style.background = cat === 'male' ? '#e94560' : '#3a2366';
   renderVoiceList();
 }
 function renderVoiceList() {
@@ -1370,6 +1380,23 @@ const server = createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`)
   const path = url.pathname
+  if ((req.method === 'GET' || req.method === 'HEAD') && path === '/ciudadan-tts-c-roja.ico') {
+    let icon
+    try {
+      icon = await readTtsFavicon(new URL('./ciudadan-tts-c-roja.ico', import.meta.url))
+    } catch (error) {
+      res.writeHead(error.code === 'ENOENT' ? 404 : 500)
+      res.end()
+      return
+    }
+    res.writeHead(200, {
+      'Content-Type': 'image/x-icon',
+      'Content-Length': icon.length,
+      'Cache-Control': 'no-store'
+    })
+    res.end(req.method === 'HEAD' ? undefined : icon)
+    return
+  }
 
   // Buscar ruta
   for (const r of routes) {
